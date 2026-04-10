@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Settings & background scan ────────────────────────────────────────────
   getSettings: () => ipcRenderer.invoke('get-settings'),
   getHomeDir: () => ipcRenderer.invoke('get-home-dir') as Promise<string>,
+  getAppVersion: () => ipcRenderer.invoke('get-app-version') as Promise<string>,
   saveSettings: (settings: unknown) => ipcRenderer.invoke('save-settings', settings),
   runBgScanNow: () => ipcRenderer.invoke('run-bg-scan'),
   updateLastScanPath: (path: string) => ipcRenderer.send('update-last-scan-path', path),
@@ -69,6 +70,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   removeBgCleanListeners: () => ipcRenderer.removeAllListeners('bg-clean-requested'),
   testNotification: () => ipcRenderer.invoke('test-notification'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   requestNotificationPermission: () => ipcRenderer.invoke('request-notification-permission'),
   markOnboardingComplete: () => ipcRenderer.invoke('mark-onboarding-complete'),
   getLoginItem: () => ipcRenderer.invoke('get-login-item') as Promise<boolean>,

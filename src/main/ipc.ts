@@ -611,6 +611,7 @@ Your recommendation MUST be consistent with your explanation. Do not say deletin
   // ── Settings ───────────────────────────────────────────────────────────────
   ipcMain.handle('get-settings', () => loadSettings())
   ipcMain.handle('get-home-dir', () => os.homedir())
+  ipcMain.handle('get-app-version', () => app.getVersion())
 
   ipcMain.handle('save-settings', (_event, settings: VectraSettings) => {
     const prev = loadSettings()
@@ -640,6 +641,10 @@ Your recommendation MUST be consistent with your explanation. Do not say deletin
   })
 
   ipcMain.handle('test-notification', () => testNotification())
+
+  ipcMain.handle('check-for-updates', () => {
+    return runAutoUpdateCheck('settings-enabled')
+  })
 
   ipcMain.handle('request-notification-permission', () => {
     // Showing a notification triggers the native macOS permission dialog on production builds.

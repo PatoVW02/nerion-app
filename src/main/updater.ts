@@ -82,26 +82,26 @@ function ensureUpdaterListeners(): void {
   listenersRegistered = true
 }
 
-export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' | 'scheduled' = 'startup'): Promise<void> {
-  if (!app.isPackaged) return
-  if (process.platform !== 'darwin') return
+export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' | 'scheduled' = 'startup'): Promise<boolean> {
+  if (!app.isPackaged) return false
+  if (process.platform !== 'darwin') return false
 
   const settings = loadSettings()
-  if (!settings.autoUpdateEnabled) return
-  if (checkInFlight) return
+  if (!settings.autoUpdateEnabled) return false
+  if (checkInFlight) return false
 
   checkInFlight = true
   try {
     const latestLandingVersion = await fetchLatestLandingVersion()
     if (!latestLandingVersion) {
       console.log('[Vectra] Auto-update check skipped: could not detect latest version from landing page.')
-      return
+      return false
     }
 
     const currentVersion = app.getVersion()
     if (compareSemver(latestLandingVersion, currentVersion) <= 0) {
       console.log(`[Vectra] Auto-update check (${reason}): already up to date (${currentVersion}).`)
-      return
+      return false
     }
 
     ensureUpdaterListeners()
@@ -111,8 +111,10 @@ export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' 
 
     console.log(`[Vectra] Auto-update check (${reason}): ${currentVersion} -> ${latestLandingVersion}. Checking provider feed.`)
     await autoUpdater.checkForUpdates()
+    return true
   } catch (err) {
     console.error('[Vectra] Auto-update check failed:', err)
+    return false
   } finally {
     checkInFlight = false
   }

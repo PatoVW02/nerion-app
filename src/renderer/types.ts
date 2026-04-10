@@ -104,6 +104,7 @@ declare global {
       // Settings & background scan
       getSettings: () => Promise<VectraSettings>
       getHomeDir: () => Promise<string>
+      getAppVersion: () => Promise<string>
       saveSettings: (settings: VectraSettings) => Promise<void>
       runBgScanNow: () => Promise<void>
       updateLastScanPath: (path: string) => void
@@ -112,6 +113,7 @@ declare global {
       onBgCleanRequested: (cb: (entries: DiskEntry[]) => void) => void
       removeBgCleanListeners: () => void
       testNotification: () => Promise<void>
+      checkForUpdates: () => Promise<boolean>
       requestNotificationPermission: () => Promise<void>
       markOnboardingComplete: () => Promise<void>
       getLoginItem: () => Promise<boolean>

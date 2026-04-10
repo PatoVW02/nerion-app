@@ -110,6 +110,9 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
   const [settings, setSettings] = useState<VectraSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [scanningNow, setScanningNow] = useState(false)
+  const [checkingForUpdates, setCheckingForUpdates] = useState(false)
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null)
+  const [appVersion, setAppVersion] = useState<string | null>(null)
   const [loginItem, setLoginItem] = useState<boolean | null>(null)
 
   // AI state
@@ -126,8 +129,11 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
   settingsRef.current = settings
 
   useEffect(() => {
-    window.electronAPI.getSettings().then(setSettings)
-    window.electronAPI.getLoginItem().then(setLoginItem)
+    window.electronAPI.getSettings().then(setSettings).catch(() => {})
+    window.electronAPI.getLoginItem().then(setLoginItem).catch(() => {})
+    if (window.electronAPI.getAppVersion) {
+      window.electronAPI.getAppVersion().then(setAppVersion).catch(() => {})
+    }
   }, [])
 
   // Register pull listeners once
@@ -198,6 +204,24 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
     const next = { ...settings, autoUpdateEnabled: !settings.autoUpdateEnabled }
     setSettings(next)
     await window.electronAPI.saveSettings(next)
+  }
+
+  async function handleCheckForUpdates() {
+    setCheckingForUpdates(true)
+    setUpdateMessage(null)
+    try {
+      const updateFound = await window.electronAPI.checkForUpdates()
+      if (!updateFound) {
+        setUpdateMessage('No update available')
+        setTimeout(() => setUpdateMessage(null), 3000)
+      }
+    } catch (err) {
+      console.error('Failed to check for updates:', err)
+      setUpdateMessage('Failed to check for updates')
+      setTimeout(() => setUpdateMessage(null), 3000)
+    } finally {
+      setCheckingForUpdates(false)
+    }
   }
 
   async function setBgInterval(hours: number) {
@@ -734,7 +758,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
           <h2 className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-3">
             Updates
           </h2>
-          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06]">
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] divide-y divide-white/[0.04]">
             <div className="flex items-start justify-between gap-4 px-4 py-4">
               <div className="min-w-0">
                 <p className="text-sm text-zinc-200 font-medium">Auto update</p>
@@ -743,6 +767,35 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
                 </p>
               </div>
               <Toggle on={!!settings?.autoUpdateEnabled} onClick={toggleAutoUpdate} disabled={!settings} />
+            </div>
+            <div className="px-4 py-4">
+              <button
+                onClick={handleCheckForUpdates}
+                disabled={checkingForUpdates || !settings}
+                className="text-xs text-blue-400 hover:text-blue-300 disabled:text-zinc-600 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+              >
+                {checkingForUpdates ? (
+                  <>
+                    <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Checking...
+                  </>
+                ) : (
+                  <>Check for updates →</>
+                )}
+              </button>
+              {updateMessage && (
+                <p className="text-xs text-zinc-500 mt-2">
+                  {updateMessage}
+                </p>
+              )}
+              {appVersion && (
+                <p className="text-xs text-zinc-600 mt-2">
+                  Current version: {appVersion}
+                </p>
+              )}
             </div>
           </div>
         </section>
