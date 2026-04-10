@@ -49,6 +49,11 @@
     ],
     "directories": {
       "output": "dist"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "PatoVW02",
+      "repo": "vectra-app"
     }
   }
 }
