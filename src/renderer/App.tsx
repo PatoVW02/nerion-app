@@ -43,6 +43,7 @@ function SlideUpBar({ children }: { children: ReactNode }) {
 }
 
 type ScanMode = 'quick' | 'deep'
+type ScanPhase = 'welcome' | 'departing' | 'active' | 'arriving'
 
 /** Well-known home directory folders that resolve to ~/name rather than ~/Library/name. */
 const HOME_FOLDER_NAMES = new Set(['Downloads'])
@@ -99,7 +100,7 @@ function AppShell() {
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [selectedPaths, setSelectedPaths] = useState<Map<string, DiskEntry>>(new Map())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
-  const [scanPhase, setScanPhase] = useState<'welcome' | 'departing' | 'active'>('welcome')
+  const [scanPhase, setScanPhase] = useState<ScanPhase>('welcome')
   const [scanTrigger, setScanTrigger] = useState(0)
 
   const { license, isPremium, activate, deactivate } = useLicense()
@@ -163,6 +164,13 @@ function AppShell() {
 
   const { tree, scanning, scannedCount, removeEntries, cancelScan } = useTreeScanner(rootPath, scanTrigger, quickScanPaths)
 
+  // Reverse transition: mount welcome in an "arriving" state, then animate to resting state.
+  useEffect(() => {
+    if (scanPhase !== 'arriving') return
+    const id = requestAnimationFrame(() => setScanPhase('welcome'))
+    return () => cancelAnimationFrame(id)
+  }, [scanPhase])
+
   // At the root level of a quick scan only show the configured subfolders; deep
   // into the tree (or in deep mode) show everything as normal.
   const currentEntries = useMemo(() => {
@@ -215,7 +223,7 @@ function AppShell() {
 
     for (const entries of tree.values()) {
       for (const entry of entries) {
-        const isDev = showDevDeps && isDevDependency(entry)
+        const isDev = isDevDependency(entry)
 
         // Direct children of a targeted Downloads folder are always cleanable
         const parentDir = entry.path.slice(0, entry.path.lastIndexOf('/'))
@@ -238,7 +246,16 @@ function AppShell() {
       }
     }
     return result
-  }, [tree, showDevDeps, quickScanAllowedPaths, rootPath])
+  }, [tree, quickScanAllowedPaths, rootPath])
+
+  const autoSelectableCleanable = useMemo(() => {
+    if (showDevDeps) return allCleanable
+    const filtered = new Map<string, DiskEntry>()
+    for (const [path, entry] of allCleanable) {
+      if (!isDevDependency(entry)) filtered.set(path, entry)
+    }
+    return filtered
+  }, [allCleanable, showDevDeps])
 
   const cleanableCount = allCleanable.size
 
@@ -297,7 +314,7 @@ function AppShell() {
   // ── Scan ──────────────────────────────────────────────────────────────────
 
   const handleScan = useCallback((pathOverride?: string) => {
-    const path = pathOverride ?? selectedPath
+    const path = pathOverride ?? (scanMode === 'quick' && QUICK_SCAN_PATH ? QUICK_SCAN_PATH : selectedPath)
     resetTo(path)
     setRootPath(path)
     setScanTrigger(t => t + 1)
@@ -308,12 +325,11 @@ function AppShell() {
     setSmartCleanOpen(false)
     smartCleanEverOpened.current = false
     setSavedLeftoverSelection(null)
-  }, [selectedPath, resetTo])
+  }, [scanMode, QUICK_SCAN_PATH, selectedPath, resetTo])
 
   /** Triggered by the Scan button on the welcome screen — animates controls out then starts scan. */
   const handleScanFromWelcome = useCallback(() => {
     const effectivePath = scanMode === 'quick' && QUICK_SCAN_PATH ? QUICK_SCAN_PATH : selectedPath
-    if (scanMode === 'quick' && QUICK_SCAN_PATH) setSelectedPath(QUICK_SCAN_PATH)
     setScanPhase('departing')
     setTimeout(() => {
       setScanPhase('active')
@@ -323,8 +339,44 @@ function AppShell() {
 
   const handleChooseFolder = useCallback(async () => {
     const picked = await window.electronAPI.openDirectory()
-    if (picked) setSelectedPath(picked)
-  }, [])
+    if (!picked) return
+    setSelectedPath(picked)
+
+    // If a scan has already completed, clear the previous results and return to
+    // the empty/welcome view until the user starts the next scan.
+    if (scanPhase === 'active' && !scanning) {
+      setScanPhase('arriving')
+      setRootPath(null)
+      resetTo(picked)
+      setSelectedPaths(new Map())
+      setContextMenu(null)
+      setInfoPanelEntry(null)
+      setSmartCleanOpen(false)
+      smartCleanEverOpened.current = false
+      setSavedLeftoverSelection(null)
+      setReviewOpen(false)
+    }
+  }, [scanPhase, scanning, resetTo])
+
+  const handleToggleScanMode = useCallback((mode: ScanMode) => {
+    if (mode === scanMode) return
+    setScanMode(mode)
+
+    // Switching modes after a completed scan should return to the empty state
+    // and require an explicit Scan click in the new mode.
+    if (scanPhase === 'active' && !scanning) {
+      setScanPhase('arriving')
+      setRootPath(null)
+      resetTo(selectedPath)
+      setSelectedPaths(new Map())
+      setContextMenu(null)
+      setInfoPanelEntry(null)
+      setSmartCleanOpen(false)
+      smartCleanEverOpened.current = false
+      setSavedLeftoverSelection(null)
+      setReviewOpen(false)
+    }
+  }, [scanMode, scanPhase, scanning, resetTo, selectedPath])
 
   // ── Navigation ────────────────────────────────────────────────────────────
 
@@ -376,11 +428,12 @@ function AppShell() {
   const handleSmartClean = useCallback(() => {
     if (!isPremium) { setUpgradeOpen(true); return }
     if (!smartCleanEverOpened.current) {
-      setSelectedPaths((prev) => new Map([...prev, ...allCleanable]))
+      // First open only: auto-select based on the dev-dependency setting.
+      setSelectedPaths((prev) => new Map([...prev, ...autoSelectableCleanable]))
       smartCleanEverOpened.current = true
     }
     setSmartCleanOpen(true)
-  }, [allCleanable, isPremium])
+  }, [autoSelectableCleanable, isPremium])
 
   const handleSmartCleanToggle = useCallback((path: string, entry: DiskEntry) => {
     setSelectedPaths((prev) => {
@@ -491,11 +544,15 @@ function AppShell() {
           ) : (
             /* Welcome screen — visible until the first scan animates it away */
             <div className="flex flex-col items-center justify-center h-full select-none">
+              {(() => {
+                const isWelcomeLeaving = scanPhase === 'departing'
+                const isWelcomeArriving = scanPhase === 'arriving'
+                return (
               <div
                 className="flex flex-col items-center gap-7 transition-all duration-300 ease-in"
                 style={{
-                  opacity: scanPhase === 'departing' ? 0 : 1,
-                  transform: scanPhase === 'departing' ? 'translateY(28px)' : 'translateY(0)',
+                  opacity: (isWelcomeLeaving || isWelcomeArriving) ? 0 : 1,
+                  transform: (isWelcomeLeaving || isWelcomeArriving) ? 'translateY(28px)' : 'translateY(0)',
                 }}
               >
                 {/* Title + subtitle */}
@@ -514,7 +571,7 @@ function AppShell() {
                     {(['quick', 'deep'] as ScanMode[]).map((mode) => (
                       <button
                         key={mode}
-                        onClick={() => setScanMode(mode)}
+                        onClick={() => handleToggleScanMode(mode)}
                         className={['px-4 py-1.5 rounded-md text-xs font-medium transition-colors capitalize', scanMode === mode ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:text-zinc-300'].join(' ')}
                       >
                         {mode}
@@ -554,6 +611,8 @@ function AppShell() {
                   </button>
                 </div>
               </div>
+                )
+              })()}
             </div>
           )}
         </div>
@@ -674,13 +733,7 @@ function AppShell() {
             onCancelScan={cancelScan}
             onChangeFolder={handleChooseFolder}
             onSmartClean={handleSmartClean}
-            onToggleScanMode={(mode) => {
-              setScanMode(mode)
-              if (mode === 'quick' && QUICK_SCAN_PATH) {
-                setSelectedPath(QUICK_SCAN_PATH)
-                handleScan(QUICK_SCAN_PATH)
-              }
-            }}
+            onToggleScanMode={handleToggleScanMode}
           />
         </SlideUpBar>
       )}

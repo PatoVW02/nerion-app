@@ -739,9 +739,9 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
           <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] divide-y divide-white/[0.04]">
             <div className="flex items-start justify-between gap-4 px-4 py-4">
               <div className="min-w-0">
-                <p className="text-sm text-zinc-200 font-medium">Show development dependencies</p>
+                <p className="text-sm text-zinc-200 font-medium">Auto-select development dependencies</p>
                 <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
-                  Include <span className="font-mono text-zinc-400">node_modules</span>, build outputs, virtual environments, and other dev artifacts as cleanable items in Smart Clean.
+                  Development dependencies are always shown in Smart Clean. Enable this to pre-select <span className="font-mono text-zinc-400">node_modules</span>, virtual environments, and other dev artifacts automatically.
                 </p>
               </div>
               <Toggle on={!!settings?.showDevDependencies} onClick={toggleDevDeps} />
