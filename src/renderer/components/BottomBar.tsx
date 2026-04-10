@@ -2,7 +2,9 @@ type ScanMode = 'quick' | 'deep'
 
 interface BottomBarProps {
   selectedPath: string
+  scanningPath?: string
   scanning: boolean
+  scannedCount: number
   cleanableCount: number
   scanMode: ScanMode
   quickScanFolders?: string[]
@@ -16,7 +18,9 @@ interface BottomBarProps {
 
 export function BottomBar({
   selectedPath,
+  scanningPath,
   scanning,
+  scannedCount,
   cleanableCount,
   scanMode,
   quickScanFolders = [],
@@ -27,6 +31,11 @@ export function BottomBar({
   onSmartClean,
   onToggleScanMode,
 }: BottomBarProps) {
+  const activeScanPath = scanningPath || selectedPath
+  const activeScanFolder = activeScanPath === '/'
+    ? 'root'
+    : (activeScanPath.split('/').filter(Boolean).pop() ?? activeScanPath)
+
   return (
     <div className="shrink-0 border-t border-white/5 px-4 py-3 flex flex-col items-center gap-1.5">
       <div className="flex items-center gap-2">
@@ -101,13 +110,24 @@ export function BottomBar({
         )}
       </div>
 
-      <span className="text-xs text-zinc-600 font-mono truncate max-w-sm" title={selectedPath}>
-        {scanMode === 'quick'
-          ? (quickScanFolders.length > 0
-              ? quickScanFolders.map(f => f.startsWith('/') ? f.split('/').pop() : f).join(' · ')
-              : '~/Library')
-          : (selectedPath === '/' ? 'root' : selectedPath)}
-      </span>
+      <div className="w-full px-2 flex justify-center">
+        {scanning ? (
+          <span className="text-xs text-zinc-500 flex items-center justify-center gap-1.5 w-full">
+            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+            <span className="truncate text-center">
+              Scanning "{activeScanFolder}" · {scannedCount.toLocaleString()} items
+            </span>
+          </span>
+        ) : (
+          <span className="text-xs text-zinc-600 font-mono truncate block w-full text-center" title={selectedPath}>
+            {scanMode === 'quick'
+              ? (quickScanFolders.length > 0
+                  ? quickScanFolders.map(f => f.startsWith('/') ? f.split('/').pop() : f).join(' · ')
+                  : '~/Library')
+              : (selectedPath === '/' ? 'root' : selectedPath)}
+          </span>
+        )}
+      </div>
     </div>
   )
 }

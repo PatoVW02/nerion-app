@@ -322,22 +322,6 @@ export function TreemapView({
   return (
     <div className="flex flex-col w-full h-full overflow-hidden">
 
-      {/* Scanning status bar — shown only while scanning AND we already have blocks */}
-      {scanning && visibleEntries.length > 0 && (
-        <div className="shrink-0 flex items-center gap-2.5 px-4 py-2 border-b border-white/5 bg-zinc-950">
-          <div className="w-3 h-3 shrink-0 rounded-full border border-transparent border-t-blue-500 animate-spin" />
-          <span className="text-xs text-zinc-400 flex-1 min-w-0">
-            Scanning
-            {folderName && (
-              <> <span className="text-blue-400 font-medium">"{folderName}"</span></>
-            )}
-            <span className="text-zinc-600 ml-1.5 tabular-nums">
-              · {scannedCount.toLocaleString()} items
-            </span>
-          </span>
-        </div>
-      )}
-
       {/* Treemap canvas */}
       <div
         ref={containerRef}

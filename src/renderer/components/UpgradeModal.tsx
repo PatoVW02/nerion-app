@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 const MONTHLY_CHECKOUT_URL = import.meta.env.VITE_MONTHLY_CHECKOUT_URL as string
@@ -17,16 +18,31 @@ interface UpgradeModalProps {
 }
 
 export function UpgradeModal({ onClose, onActivate }: UpgradeModalProps) {
+  const [entered, setEntered] = useState(false)
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setEntered(true))
+    return () => cancelAnimationFrame(id)
+  }, [])
+
   function openCheckout(url: string) {
     window.electronAPI.openExternal(url)
   }
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      className={[
+        'fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm',
+        'transition-opacity duration-200 ease-out',
+        entered ? 'opacity-100' : 'opacity-0'
+      ].join(' ')}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="relative w-full max-w-[560px] mx-4 bg-zinc-950 border border-white/10 rounded-2xl shadow-2xl overflow-hidden">
+      <div className={[
+        'relative w-full max-w-[560px] mx-4 bg-zinc-950 border border-white/10 rounded-2xl shadow-2xl overflow-hidden',
+        'transition-all duration-200 ease-out',
+        entered ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[0.98]'
+      ].join(' ')}>
         {/* Close */}
         <button
           onClick={onClose}

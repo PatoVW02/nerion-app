@@ -74,6 +74,7 @@ export function App() {
 }
 
 function AppShell() {
+  const MODAL_SWITCH_DELAY_MS = 200
   const [scanMode, setScanMode] = useState<ScanMode>('deep')
   const [showDevDeps, setShowDevDeps] = useState(false)
   const [quickScanFolders, setQuickScanFolders] = useState<string[]>(['Caches', 'Logs', 'Developer', 'Containers'])
@@ -724,7 +725,9 @@ function AppShell() {
         <SlideUpBar>
           <BottomBar
             selectedPath={selectedPath}
+            scanningPath={rootPath ?? undefined}
             scanning={scanning}
+            scannedCount={scannedCount}
             cleanableCount={cleanableCount}
             scanMode={scanMode}
             quickScanFolders={quickScanFolders}
@@ -760,22 +763,28 @@ function AppShell() {
           onQuickScanFoldersChange={setQuickScanFolders}
           isPremium={isPremium}
           license={license}
-          onUpgrade={() => { setSettingsOpen(false); setUpgradeOpen(true) }}
-          onLicense={() => { setSettingsOpen(false); setLicenseOpen(true) }}
+          onUpgrade={() => setUpgradeOpen(true)}
+          onLicense={() => setLicenseOpen(true)}
         />
       )}
 
       {upgradeOpen && (
         <UpgradeModal
           onClose={() => setUpgradeOpen(false)}
-          onActivate={() => { setUpgradeOpen(false); setLicenseOpen(true) }}
+          onActivate={() => {
+            setUpgradeOpen(false)
+            setTimeout(() => setLicenseOpen(true), MODAL_SWITCH_DELAY_MS)
+          }}
         />
       )}
       {licenseOpen && (
         <LicenseModal
           license={license}
           onClose={() => setLicenseOpen(false)}
-          onUpgrade={() => { setLicenseOpen(false); setUpgradeOpen(true) }}
+          onUpgrade={() => {
+            setLicenseOpen(false)
+            setTimeout(() => setUpgradeOpen(true), MODAL_SWITCH_DELAY_MS)
+          }}
           onActivate={activate}
           onDeactivate={deactivate}
         />

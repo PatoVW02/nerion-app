@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { LicenseInfo } from '../types'
 
@@ -13,10 +13,28 @@ interface LicenseModalProps {
 }
 
 export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeactivate }: LicenseModalProps) {
+  const [entered, setEntered] = useState(false)
   const [key, setKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [deactivating, setDeactivating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const keyInputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setEntered(true))
+    return () => cancelAnimationFrame(id)
+  }, [])
+
+  useEffect(() => {
+    if (license?.active) return
+    const id = requestAnimationFrame(() => {
+      const input = keyInputRef.current
+      if (!input) return
+      input.focus()
+      input.select()
+    })
+    return () => cancelAnimationFrame(id)
+  }, [license?.active])
 
   async function handleActivate() {
     const trimmed = key.trim()
@@ -41,10 +59,18 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      className={[
+        'fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm',
+        'transition-opacity duration-200 ease-out',
+        entered ? 'opacity-100' : 'opacity-0'
+      ].join(' ')}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="relative w-full max-w-[400px] mx-4 bg-zinc-950 border border-white/10 rounded-xl shadow-2xl overflow-hidden">
+      <div className={[
+        'relative w-full max-w-[400px] mx-4 bg-zinc-950 border border-white/10 rounded-xl shadow-2xl overflow-hidden',
+        'transition-all duration-200 ease-out',
+        entered ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[0.98]'
+      ].join(' ')}>
         {/* Close */}
         <button
           onClick={onClose}
@@ -105,6 +131,7 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
           <div className="px-6 pb-6 space-y-3">
             <div>
               <input
+                ref={keyInputRef}
                 value={key}
                 onChange={(e) => { setKey(e.target.value); setError(null) }}
                 onKeyDown={(e) => e.key === 'Enter' && handleActivate()}
