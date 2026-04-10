@@ -1,8 +1,7 @@
 import { createPortal } from 'react-dom'
 
-// ─── Fill in your Lemon Squeezy checkout URLs after creating products ──────────
-const MONTHLY_CHECKOUT_URL = 'https://vectra-file-system.lemonsqueezy.com/checkout/buy/4833cbaf-5b21-4f0a-b55c-121ad2c28cdd'
-const LIFETIME_CHECKOUT_URL = 'https://vectra-file-system.lemonsqueezy.com/checkout/buy/79bc6cf3-7385-4df4-8c87-929ade2aef36'
+const MONTHLY_CHECKOUT_URL = import.meta.env.VITE_MONTHLY_CHECKOUT_URL as string
+const LIFETIME_CHECKOUT_URL = import.meta.env.VITE_LIFETIME_CHECKOUT_URL as string
 
 const FEATURES = [
   { icon: '✦', label: 'Smart Clean', desc: 'AI-curated list of safe-to-delete caches, logs & leftovers' },
