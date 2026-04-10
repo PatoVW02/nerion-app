@@ -71,6 +71,7 @@ const QUICK_FOLDER_OPTIONS = [
   { name: 'Developer',              desc: 'Xcode DerivedData & dev tool caches' },
   { name: 'Containers',             desc: 'App sandbox containers' },
   { name: 'Downloads',              desc: '~/Downloads folder' },
+  { name: 'Desktop',                desc: '~/Desktop folder' },
   { name: 'Application Support',    desc: 'Persistent app data' },
   { name: 'Saved Application State', desc: 'Saved window & app states' },
   { name: 'Group Containers',       desc: 'Shared app group containers' },
@@ -489,7 +490,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
         </button>
-        <h1 className="text-sm font-semibold text-zinc-200">Settings</h1>
+        <h1 className="text-zinc-500 text-xs font-medium tracking-widest uppercase select-none">Settings</h1>
       </HeaderFrame>
 
       {/* Tabs */}

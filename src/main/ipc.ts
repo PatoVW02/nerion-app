@@ -426,7 +426,46 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('trash-entries', async (_event, paths: string[]) => {
-    const requested = Math.max(0, paths.length)
+    const home = os.homedir()
+    const CONTENT_ONLY_DIRS = new Set([
+      `${home}/Desktop`,
+      `${home}/Downloads`,
+      `${home}/Documents`,
+      `${home}/Movies`,
+      `${home}/Music`,
+      `${home}/Pictures`,
+    ])
+
+    const prepErrors: string[] = []
+    const expandedTargets: string[] = []
+
+    for (const originalPath of paths) {
+      const normalized = originalPath.replace(/\/+$/, '')
+      if (!CONTENT_ONLY_DIRS.has(normalized)) {
+        expandedTargets.push(originalPath)
+        continue
+      }
+
+      try {
+        const children = await readdir(normalized)
+        for (const child of children) {
+          expandedTargets.push(path.join(normalized, child))
+        }
+      } catch (err) {
+        prepErrors.push(`Failed to access ${normalized}: ${String(err)}`)
+      }
+    }
+
+    // Deduplicate while preserving order
+    const seen = new Set<string>()
+    const effectivePaths: string[] = []
+    for (const targetPath of expandedTargets) {
+      if (seen.has(targetPath)) continue
+      seen.add(targetPath)
+      effectivePaths.push(targetPath)
+    }
+
+    const requested = Math.max(0, effectivePaths.length)
     const premium = getLicenseInfo().active
 
     if (!premium) {
@@ -445,7 +484,7 @@ export function registerIpcHandlers(): void {
 
     const errors: string[] = []
     let deletedCount = 0
-    for (const p of paths) {
+    for (const p of effectivePaths) {
       try {
         await shell.trashItem(p)
         deletedCount += 1
@@ -466,7 +505,8 @@ export function registerIpcHandlers(): void {
       })
     }
 
-    return errors.length === 0 ? null : errors.join('\n')
+    const allErrors = [...prepErrors, ...errors]
+    return allErrors.length === 0 ? null : allErrors.join('\n')
   })
 
   ipcMain.handle('get-item-stats', async (_event, filePath: string) => {
