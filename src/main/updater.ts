@@ -1,6 +1,7 @@
 import { app, net, BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { loadSettings } from './settings'
+import { setQuitting } from './background'
 
 const DEFAULT_LANDING_URLS = [
     'https://vectra-mu.vercel.app', 
@@ -171,6 +172,7 @@ export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' 
 
 export function installDownloadedUpdateNow(): boolean {
   if (!downloadedUpdateReady) return false
+  setQuitting()
   autoUpdater.quitAndInstall(false, true)
   return true
 }

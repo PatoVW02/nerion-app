@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerIpcHandlers } from './ipc'
-import { initTray, scheduleBackgroundScan, isQuitting } from './background'
+import { initTray, scheduleBackgroundScan, isQuitting, setQuitting } from './background'
 import { loadSettings } from './settings'
 import { runAutoUpdateCheck, scheduleAutoUpdateChecks } from './updater'
 
@@ -51,6 +51,9 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.patricio.vectra')
+
+  // Mark all real app quits so close handlers don't hide to tray.
+  app.on('before-quit', () => setQuitting())
 
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
 
