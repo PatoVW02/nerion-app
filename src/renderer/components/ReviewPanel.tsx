@@ -2,8 +2,9 @@ import { useState, useCallback, useEffect, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { DiskEntry } from '../types'
 import { formatSize } from '../utils/format'
-import { isCriticalPath } from '../utils/criticalPaths'
+import { isCriticalPath, isContentOnlyProtectedRoot } from '../utils/criticalPaths'
 import { buildCleanableTree, TreeNode } from '../utils/buildTree'
+import { HeaderFrame } from './HeaderFrame'
 
 // ─── Animated checkmark ───────────────────────────────────────────────────────
 
@@ -95,6 +96,7 @@ function allNodeRemoving(node: TreeNode, removingPaths: Set<string>): boolean {
 interface ReviewTreeItemProps {
   node: TreeNode
   depth: number
+  homeDir: string
   selected: Set<string>
   removingPaths: Set<string>
   deleting: boolean
@@ -104,7 +106,7 @@ interface ReviewTreeItemProps {
 }
 
 const ReviewTreeItem = memo(function ReviewTreeItem({
-  node, depth, selected, removingPaths, deleting, onToggle, expandKey,
+  node, depth, homeDir, selected, removingPaths, deleting, onToggle, expandKey,
 }: ReviewTreeItemProps) {
   const [expanded, setExpanded] = useState(true)
 
@@ -118,6 +120,7 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
   }, [expandKey.seq])
   const isDir = node.entry ? node.entry.isDir : true
   const critical = isCriticalPath(node.path)
+  const contentOnlyProtectedRoot = critical && isDir && isContentOnlyProtectedRoot(node.path)
 
   const selectableDescendants = useMemo(
     () => (hasChildren ? getSelectableDescendants(node) : null),
@@ -126,24 +129,38 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
     [node],
   )
 
-  // Leaf (cleanable) check state
-  const directlyChecked = node.isCleanable && !!node.entry && !critical && selected.has(node.path)
+  // Protected folders can still be used as a fast "select contents" toggle,
+  // but the protected folder path itself must never be selected for deletion.
+  const protectedContentsTargets = useMemo(() => {
+    if (!critical || !isDir) return null
+    const all = getSelectableDescendants(node)
+    return all.filter(p => p !== node.path)
+  }, [critical, isDir, node])
 
-  // Intermediate (non-cleanable) batch-check state
-  const allDescendantsSelected =
-    !node.isCleanable &&
-    (selectableDescendants?.length ?? 0) > 0 &&
-    (selectableDescendants?.every(p => selected.has(p)) ?? false)
-  const someDescendantsSelected =
-    selectableDescendants?.some(p => selected.has(p)) ?? false
+  const checkboxTargets = useMemo(() => {
+    // Protected folder row toggles only descendants (contents), not itself.
+    if (protectedContentsTargets && protectedContentsTargets.length > 0) return protectedContentsTargets
+    // If a protected home root appears as a leaf in review, selecting it is safe:
+    // main-process deletion expands it to children and keeps the root folder.
+    if (contentOnlyProtectedRoot && node.isCleanable && node.entry) return [node.path]
+    // Regular selectable leaf.
+    if (node.isCleanable && node.entry) return [node.path]
+    // Intermediate folder toggles all selectable descendants.
+    return selectableDescendants ?? []
+  }, [protectedContentsTargets, contentOnlyProtectedRoot, node, selectableDescendants])
+
+  const allTargetsSelected =
+    checkboxTargets.length > 0 && checkboxTargets.every(p => selected.has(p))
+  const someTargetsSelected =
+    checkboxTargets.some(p => selected.has(p))
 
   const batchToggle = useCallback(() => {
-    if (!selectableDescendants) return
-    const allSelected = selectableDescendants.every(p => selected.has(p))
-    for (const p of selectableDescendants) {
+    if (checkboxTargets.length === 0) return
+    const allSelected = checkboxTargets.every(p => selected.has(p))
+    for (const p of checkboxTargets) {
       if (allSelected ? selected.has(p) : !selected.has(p)) onToggle(p)
     }
-  }, [selectableDescendants, selected, onToggle])
+  }, [checkboxTargets, selected, onToggle])
 
   // Fade-out animation for leaf items being deleted
   const removing = node.isCleanable && !!node.entry && removingPaths.has(node.path)
@@ -181,46 +198,33 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
         </button>
 
         {/* Checkbox */}
-        {node.isCleanable && node.entry ? (
-          // Selectable leaf
-          <button
-            onClick={() => !critical && onToggle(node.path)}
-            disabled={deleting || critical}
-            className={[
-              'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors disabled:cursor-not-allowed',
-              critical
-                ? 'border-zinc-700 bg-transparent opacity-30'
-                : directlyChecked
-                ? 'bg-blue-600 border-blue-600'
-                : 'border-zinc-600 bg-transparent',
-            ].join(' ')}
-          >
-            {directlyChecked && !critical && (
-              <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-              </svg>
-            )}
-          </button>
-        ) : (selectableDescendants?.length ?? 0) > 0 ? (
-          // Intermediate folder — batch toggle all descendants
+        {checkboxTargets.length > 0 ? (
+          // Selectable row (leaf, intermediate folder, or protected-folder contents selector)
           <button
             onClick={batchToggle}
             disabled={deleting}
             className={[
-              'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors disabled:cursor-not-allowed',
-              allDescendantsSelected
+              'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
+              'disabled:cursor-not-allowed',
+              critical
+                ? allTargetsSelected
+                  ? 'bg-amber-600/90 border-amber-500'
+                  : someTargetsSelected
+                  ? 'bg-amber-900/60 border-amber-500'
+                  : 'border-amber-700/60 bg-transparent'
+                : allTargetsSelected
                 ? 'bg-blue-600 border-blue-600'
-                : someDescendantsSelected
+                : someTargetsSelected
                 ? 'bg-blue-900/60 border-blue-500'
                 : 'border-zinc-600 bg-transparent',
             ].join(' ')}
           >
-            {allDescendantsSelected && (
+            {allTargetsSelected && (
               <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
               </svg>
             )}
-            {!allDescendantsSelected && someDescendantsSelected && (
+            {!allTargetsSelected && someTargetsSelected && (
               <svg className="w-2.5 h-2.5 text-blue-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 12h14" />
               </svg>
@@ -249,8 +253,8 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
         {/* Label + size */}
         <button
           onClick={() => {
-            if (!node.isCleanable || !node.entry || critical) return
-            onToggle(node.path)
+            if (checkboxTargets.length === 0) return
+            batchToggle()
           }}
           className="flex-1 min-w-0 flex items-center justify-between gap-1 text-left min-w-0"
         >
@@ -285,6 +289,7 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
           key={child.path}
           node={child}
           depth={depth + 1}
+          homeDir={homeDir}
           selected={selected}
           removingPaths={removingPaths}
           deleting={deleting}
@@ -309,8 +314,12 @@ interface ReviewPanelProps {
 }
 
 export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onCancel, onDone, onUpgradeClick }: ReviewPanelProps) {
+  const selectableInReview = entries.filter(
+    (e) => !isCriticalPath(e.path) || isContentOnlyProtectedRoot(e.path),
+  )
+
   const [selected, setSelected] = useState<Set<string>>(
-    () => new Set(entries.filter(e => !isCriticalPath(e.path)).map(e => e.path)),
+    () => new Set(selectableInReview.map(e => e.path)),
   )
   const [phase, setPhase] = useState<'review' | 'deleting' | 'done'>('review')
   const [removingPaths, setRemovingPaths] = useState<Set<string>>(new Set())
@@ -344,16 +353,16 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
     })
   }, [])
 
-  const nonCritical = entries.filter(e => !isCriticalPath(e.path))
-  const allChecked = nonCritical.length > 0 && nonCritical.every(e => selected.has(e.path))
-  const someChecked = nonCritical.some(e => selected.has(e.path))
+  const hasCriticalEntries = entries.some(e => isCriticalPath(e.path))
+  const allChecked = selectableInReview.length > 0 && selectableInReview.every(e => selected.has(e.path))
+  const someChecked = selectableInReview.some(e => selected.has(e.path))
 
   const toggleAll = useCallback(() => {
     setSelected(allChecked
       ? new Set()
-      : new Set(nonCritical.map(e => e.path)),
+      : new Set(selectableInReview.map(e => e.path)),
     )
-  }, [allChecked, nonCritical])
+  }, [allChecked, selectableInReview])
 
   const selectedEntries = entries.filter(e => selected.has(e.path))
   const totalSelectedKB = selectedEntries.reduce((s, e) => s + e.sizeKB, 0)
@@ -415,37 +424,32 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
     >
       {phase === 'done' ? (
         <>
-          {/* Spacer matching header height so done view is vertically centred below traffic lights */}
-          <div
-            className="shrink-0 border-b border-white/5"
-            style={{ paddingTop: '36px' } as React.CSSProperties}
-          />
+          {/* Shared header shell keeps spacing/separator consistent with the app layout. */}
+          <HeaderFrame>
+            <span className="opacity-0 select-none">Review</span>
+          </HeaderFrame>
           <DoneView freedKB={freedKB} onDone={onDone} />
         </>
       ) : (
         <>
-          {/* Header — padded top to clear macOS traffic lights */}
-          <div
-            className="shrink-0 flex items-center gap-3 px-6 pb-4 border-b border-white/5"
-            style={{ paddingTop: '36px' } as React.CSSProperties}
-          >
+          <HeaderFrame>
             <button
               onClick={onCancel}
               disabled={phase === 'deleting'}
-              className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+              className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-500 hover:text-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
-              Back
             </button>
-            <h2 className="flex-1 text-center text-sm font-semibold text-zinc-100">
+            <h2 className="text-zinc-500 text-xs font-medium tracking-widest uppercase select-none">
               Review Deletion
             </h2>
-            <span className="text-xs text-zinc-600 w-16 text-right tabular-nums">
+            <span className="ml-auto text-xs text-zinc-600 w-16 text-right tabular-nums">
               {selectedEntries.length} of {entries.length}
             </span>
-          </div>
+          </HeaderFrame>
 
           {/* Summary strip */}
           <div className="shrink-0 flex items-center justify-between px-6 py-2.5 bg-red-950/20 border-b border-red-900/20">
@@ -461,9 +465,17 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
             )}
           </div>
 
+          {hasCriticalEntries && (
+            <div className="shrink-0 px-6 py-2 border-b border-amber-900/20 bg-amber-950/10">
+              <p className="text-[11px] text-amber-400 leading-relaxed">
+                Protected folders are cleaned by removing their contents only; the folder itself is kept.
+              </p>
+            </div>
+          )}
+
           {/* Select-all + expand/collapse toolbar */}
           <div className="shrink-0 flex items-center gap-3 px-6 py-2.5 border-b border-white/5">
-            {nonCritical.length > 1 && (
+            {selectableInReview.length > 1 && (
               <>
                 <button
                   onClick={toggleAll}
@@ -509,6 +521,7 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
                 key={node.path}
                 node={node}
                 depth={0}
+                homeDir={homeDir}
                 selected={selected}
                 removingPaths={removingPaths}
                 deleting={phase === 'deleting'}

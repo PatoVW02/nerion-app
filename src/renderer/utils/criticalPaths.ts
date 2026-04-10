@@ -83,5 +83,16 @@ export function isCriticalPath(itemPath: string): boolean {
   // Any direct user home directory under /Users (e.g. /Users/jane)
   if (/^\/Users\/[^/]+$/.test(normalized)) return true
 
+  // Common user data roots should always be protected, even if HOME couldn't be resolved.
+  if (/^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures|Applications)$/.test(normalized)) {
+    return true
+  }
+
   return false
+}
+
+// Protected user roots where cleanup should target contents only (never the root folder).
+export function isContentOnlyProtectedRoot(itemPath: string): boolean {
+  const normalized = itemPath.replace(/\/+$/, '')
+  return /^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures)$/.test(normalized)
 }

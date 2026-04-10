@@ -6,6 +6,7 @@ interface ContextMenuProps {
   isDir: boolean
   isSelected: boolean
   isCritical: boolean
+  canSelect: boolean
   onRevealInFinder: () => void
   onToggleSelect: () => void
   onInfo: () => void
@@ -17,6 +18,7 @@ export function ContextMenu({
   y,
   isSelected,
   isCritical,
+  canSelect,
   onRevealInFinder,
   onToggleSelect,
   onInfo,
@@ -52,18 +54,18 @@ export function ContextMenu({
         Reveal in Finder
       </button>
       <button
-        disabled={isCritical && !isSelected}
+        disabled={!canSelect && !isSelected}
         className={`w-full px-3 py-2 text-left text-sm transition-colors ${
-          isCritical && !isSelected
+          !canSelect && !isSelected
             ? 'text-zinc-600 cursor-not-allowed'
             : isSelected
               ? 'text-blue-400 hover:bg-white/10'
               : 'text-zinc-200 hover:bg-white/10'
         }`}
-        onClick={() => { if (!isCritical || isSelected) { onToggleSelect(); onClose() } }}
+        onClick={() => { if (canSelect || isSelected) { onToggleSelect(); onClose() } }}
       >
         {isSelected ? 'Remove from Selection' : 'Add to Selection'}
-        {isCritical && !isSelected && (
+        {!canSelect && isCritical && !isSelected && (
           <span className="ml-1.5 text-[10px] text-zinc-600">protected</span>
         )}
       </button>

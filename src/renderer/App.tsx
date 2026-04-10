@@ -11,7 +11,7 @@ import { ReviewPanel } from './components/ReviewPanel'
 import { useNavigation } from './hooks/useNavigation'
 import { useTreeScanner } from './hooks/useTreeScanner'
 import { isCleanable, isDevDependency } from './utils/cleanable'
-import { isCriticalPath } from './utils/criticalPaths'
+import { isCriticalPath, isContentOnlyProtectedRoot } from './utils/criticalPaths'
 import { DiskEntry } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
 import { OnboardingFlow } from './components/OnboardingFlow'
@@ -46,7 +46,7 @@ type ScanMode = 'quick' | 'deep'
 type ScanPhase = 'welcome' | 'departing' | 'active' | 'arriving'
 
 /** Well-known home directory folders that resolve to ~/name rather than ~/Library/name. */
-const HOME_FOLDER_NAMES = new Set(['Downloads'])
+const HOME_FOLDER_NAMES = new Set(['Downloads', 'Desktop'])
 
 const MIN_PANEL_WIDTH = 220
 const MAX_PANEL_WIDTH = 600
@@ -75,9 +75,9 @@ export function App() {
 
 function AppShell() {
   const MODAL_SWITCH_DELAY_MS = 200
-  const [scanMode, setScanMode] = useState<ScanMode>('deep')
+  const [scanMode, setScanMode] = useState<ScanMode>('quick')
   const [showDevDeps, setShowDevDeps] = useState(false)
-  const [quickScanFolders, setQuickScanFolders] = useState<string[]>(['Caches', 'Logs', 'Developer', 'Containers'])
+  const [quickScanFolders, setQuickScanFolders] = useState<string[]>(['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop'])
   const [homeDir, setHomeDir] = useState<string | null>(null)
   const [deleteQuotaUsed, setDeleteQuotaUsed] = useState(0)
 
@@ -92,7 +92,7 @@ function AppShell() {
       window.electronAPI.getHomeDir(),
     ]).then(([s, home]) => {
       setShowDevDeps(s.showDevDependencies ?? false)
-      setQuickScanFolders(s.quickScanFolders ?? ['Caches', 'Logs', 'Developer', 'Containers'])
+      setQuickScanFolders(s.quickScanFolders ?? ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop'])
       setDeleteQuotaUsed(s.deleteQuota?.used ?? 0)
       setHomeDir(home)
     })
@@ -748,6 +748,7 @@ function AppShell() {
           isDir={contextMenu.entry.isDir}
           isSelected={selectedPaths.has(contextMenu.entry.path)}
           isCritical={isCriticalPath(contextMenu.entry.path)}
+          canSelect={!isCriticalPath(contextMenu.entry.path) || isContentOnlyProtectedRoot(contextMenu.entry.path)}
           onRevealInFinder={handleRevealInFinder}
           onToggleSelect={handleToggleSelect}
           onInfo={handleInfo}

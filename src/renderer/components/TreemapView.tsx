@@ -1,7 +1,7 @@
 import { useRef, useState, useLayoutEffect, useMemo } from 'react'
 import { DiskEntry } from '../types'
 import { formatSize } from '../utils/format'
-import { isCriticalPath } from '../utils/criticalPaths'
+import { isCriticalPath, isContentOnlyProtectedRoot } from '../utils/criticalPaths'
 import { EmptyState } from './EmptyState'
 import { ScanningLoader } from './ScanningLoader'
 
@@ -207,7 +207,8 @@ function TreemapBlock({
   const showLabel    = w >= 48 && h >= 22
   const showSize     = w >= 72 && h >= 44
   const critical     = isCriticalPath(entry.path)
-  const showCheckbox = !critical && w >= 52 && h >= 26
+  const selectableContentOnlyRoot = critical && isContentOnlyProtectedRoot(entry.path)
+  const showCheckbox = (!critical || selectableContentOnlyRoot) && w >= 52 && h >= 26
 
   return (
     <div

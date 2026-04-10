@@ -6,13 +6,52 @@ import { loadSettings, patchSettings } from './settings'
 import * as os from 'os'
 
 const CLEANABLE_NAMES = new Set(['.cache', '.tmp', 'tmp', 'temp', '.temp', 'logs', 'deriveddata'])
+const DEV_DEPENDENCY_NAMES = new Set([
+  'node_modules',
+  'venv', '.venv', 'env', '__pycache__', '.tox',
+  '.m2',
+  '.gradle',
+  'vendor',
+  'target',
+  '.build',
+  'pods',
+  '.stack-work',
+  'bower_components',
+])
 const SYSTEM_PATH_PREFIXES = ['/opt/', '/usr/', '/System/', '/Library/', '/Applications/', '/Developer/', '/private/', '/bin/', '/sbin/']
+const MANAGED_PATH_SUBSTRINGS = [
+  '/.nvm/',
+  '/.vscode/',
+  '/.rbenv/',
+  '/.pyenv/',
+  '/.asdf/',
+  '/homebrew/',
+  '.app/Contents/',
+  '/ShipIt/',
+  '/.npm/',
+  '/.copilot/',
+  '/go/pkg/',
+  '/Application Support/',
+  '/Library/Python/',
+  '/Library/Containers/',
+]
 function isCleanableEntry(e: DiskEntry): boolean {
   if (!e.isDir || !CLEANABLE_NAMES.has(e.name.toLowerCase())) return false
   for (const prefix of SYSTEM_PATH_PREFIXES) {
     if (e.path.startsWith(prefix)) return false
   }
   return !e.path.includes('/Library/Containers/')
+}
+
+function isDevDependencyEntry(e: DiskEntry): boolean {
+  if (!DEV_DEPENDENCY_NAMES.has(e.name.toLowerCase())) return false
+  for (const prefix of SYSTEM_PATH_PREFIXES) {
+    if (e.path.startsWith(prefix)) return false
+  }
+  for (const sub of MANAGED_PATH_SUBSTRINGS) {
+    if (e.path.includes(sub)) return false
+  }
+  return true
 }
 
 function fmtKB(kb: number): string {
@@ -99,9 +138,12 @@ export function rebuildTrayMenu(): void {
   const s = loadSettings()
   const { backgroundScan: bg } = s
   const bgTotalKB = bg.lastScanResults.reduce((s, r) => s + r.sizeKB, 0)
+  const manualTs = s.lastManualScanTime ?? 0
+  const bgTs = bg.lastScanTime ?? 0
+  const cleanedTs = s.lastCleanedTime ?? 0
   // Hide background scan results when a manual scan has happened more recently —
   // those results are stale relative to what the user just scanned.
-  const manualScanIsNewer = !!(s.lastManualScanTime && (!bg.lastScanTime || s.lastManualScanTime > bg.lastScanTime))
+  const manualScanIsNewer = manualTs > bgTs
   const hasResults = bg.lastScanResults.length > 0 && !manualScanIsNewer
 
   const items: Electron.MenuItemConstructorOptions[] = [
@@ -116,12 +158,12 @@ export function rebuildTrayMenu(): void {
   ]
 
   // Manual scan / clean status takes priority over background scan status
-  if (s.lastCleanedTime) {
+  if (s.lastCleanedTime && cleanedTs >= Math.max(manualTs, bgTs)) {
     items.push({
       label: `Last scan ${timeAgo(s.lastCleanedTime)} · Cleaned ${fmtKB(s.lastCleanedKB)}`,
       enabled: false
     })
-  } else if (s.lastManualScanTime) {
+  } else if (s.lastManualScanTime && manualTs >= bgTs) {
     items.push({
       label: s.lastManualScanFoundKB > 0
         ? `Last scan ${timeAgo(s.lastManualScanTime)} · Found ${fmtKB(s.lastManualScanFoundKB)}`
@@ -191,37 +233,62 @@ export function rebuildTrayMenu(): void {
 function scanFolder(dirPath: string): Promise<DiskEntry[]> {
   return new Promise((resolve) => {
     const entries: DiskEntry[] = []
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const cancel = scanDirectoryStreaming(
+    scanDirectoryStreaming(
       dirPath,
       (e) => entries.push(e),
-      () => { if (timer) clearTimeout(timer); resolve(entries) },
+      () => resolve(entries),
       { lowPriority: true }
     )
-    // Per-folder timeout: 90 seconds — much tighter than a full-home scan
-    timer = setTimeout(() => { cancel(); resolve(entries) }, 90_000)
   })
 }
-
-const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 export async function runBackgroundScan(): Promise<void> {
   if (scanning) return
   const settings = loadSettings()
   const home = os.homedir()
+  const libraryRoot = join(home, 'Library')
 
   // Always scan the configured quick scan folders for speed and lower I/O impact.
   // Fall back to the default set if the setting is missing or empty.
   const folders = settings.quickScanFolders?.length
     ? settings.quickScanFolders
-    : ['Caches', 'Logs', 'Developer', 'Containers']
+    : ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop']
   // Folders starting with '/' are absolute custom paths.
-  // Well-known home folder names (e.g. 'Downloads') resolve to ~/name.
+  // Well-known home folder names (e.g. 'Downloads', 'Desktop') resolve to ~/name.
   // Everything else resolves to ~/Library/name.
-  const HOME_FOLDER_NAMES = new Set(['Downloads'])
-  const scanPaths = folders.map(f =>
-    f.startsWith('/') ? f : HOME_FOLDER_NAMES.has(f) ? join(home, f) : join(home, 'Library', f)
-  )
+  const HOME_FOLDER_NAMES = new Set(['Downloads', 'Desktop'])
+  const allowedPaths = new Set(folders.map(f =>
+    f.startsWith('/') ? f : HOME_FOLDER_NAMES.has(f) ? join(home, f) : join(libraryRoot, f)
+  ))
+
+  // Mirror renderer quick-scan path strategy:
+  // 1) scan ~/Library once if any Library-relative folder is enabled,
+  // 2) scan home-relative folders (Downloads/Desktop) directly,
+  // 3) scan absolute custom paths outside ~/Library directly.
+  const scanPaths: string[] = []
+  if (folders.some(f => !f.startsWith('/') && !HOME_FOLDER_NAMES.has(f))) {
+    scanPaths.push(libraryRoot)
+  }
+  for (const f of folders) {
+    if (!f.startsWith('/') && HOME_FOLDER_NAMES.has(f)) scanPaths.push(join(home, f))
+  }
+  for (const f of folders) {
+    if (f.startsWith('/') && !f.startsWith(`${libraryRoot}/`)) scanPaths.push(f)
+  }
+
+  const dedupedScanPaths: string[] = []
+  const seen = new Set<string>()
+  for (const p of scanPaths) {
+    if (seen.has(p)) continue
+    seen.add(p)
+    dedupedScanPaths.push(p)
+  }
+
+  const allowedPrefixes = [...allowedPaths]
+  const downloadsParents = new Set<string>()
+  for (const p of allowedPaths) {
+    if (p.split('/').pop()?.toLowerCase() === 'downloads') downloadsParents.add(p)
+  }
 
   scanning = true
   rebuildTrayMenu()
@@ -229,11 +296,22 @@ export async function runBackgroundScan(): Promise<void> {
   try {
     const allCleanable: DiskEntry[] = []
 
-    for (const scanPath of scanPaths) {
+    for (const scanPath of dedupedScanPaths) {
       const entries = await scanFolder(scanPath)
-      allCleanable.push(...entries.filter(isCleanableEntry))
-      // Brief pause between folders to keep I/O pressure low
-      await delay(300)
+      for (const entry of entries) {
+        const isDev = isDevDependencyEntry(entry)
+        const parentDir = entry.path.slice(0, entry.path.lastIndexOf('/'))
+        const isDownloadsItem = downloadsParents.has(parentDir) && entry.sizeKB > 0
+
+        if (!isDev && !isDownloadsItem) {
+          const inAllowedPath = allowedPrefixes.some(p => entry.path === p || entry.path.startsWith(`${p}/`))
+          if (!inAllowedPath) continue
+        }
+
+        if (isCleanableEntry(entry) || isDev || isDownloadsItem) {
+          allCleanable.push(entry)
+        }
+      }
     }
 
     const totalKB = allCleanable.reduce((s, e) => s + e.sizeKB, 0)

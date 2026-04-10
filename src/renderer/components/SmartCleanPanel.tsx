@@ -4,7 +4,7 @@ import { DiskEntry, AppLeftover } from '../types'
 import { isCleanable, isDevDependency } from '../utils/cleanable'
 import { formatSize } from '../utils/format'
 import { buildCleanableTree, TreeNode } from '../utils/buildTree'
-import { isCriticalPath } from '../utils/criticalPaths'
+import { isCriticalPath, isContentOnlyProtectedRoot } from '../utils/criticalPaths'
 
 interface SmartCleanPanelProps {
   allCleanable: Map<string, DiskEntry>
@@ -385,7 +385,7 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
           <ItemCtxMenu
             x={ctx.x}
             y={ctx.y}
-            canSelect={hasCleanableContent && !isCriticalPath(node.path)}
+            canSelect={hasCleanableContent && (!isCriticalPath(node.path) || isContentOnlyProtectedRoot(node.path))}
             isSelected={ctxIsSelected}
             onToggle={ctxToggle}
             onInfo={() => node.entry && onInfo(node.entry)}
@@ -455,7 +455,7 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo }: LeftoverRowP
         <ItemCtxMenu
           x={ctx.x}
           y={ctx.y}
-          canSelect={!isCriticalPath(item.path)}
+          canSelect={!isCriticalPath(item.path) || isContentOnlyProtectedRoot(item.path)}
           isSelected={checked}
           onToggle={() => { onToggle(); setCtx(null) }}
           onInfo={() => { onInfo(asDiskEntry); setCtx(null) }}

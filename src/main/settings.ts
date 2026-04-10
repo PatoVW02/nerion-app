@@ -52,7 +52,7 @@ const DEFAULTS: VectraSettings = {
   preferredOllamaModel: null,
   onboardingComplete: false,
   showDevDependencies: false,
-  quickScanFolders: ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads'],
+  quickScanFolders: ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop'],
   customQuickScanFolders: [],
   lastManualScanTime: null,
   lastManualScanFoundKB: 0,
