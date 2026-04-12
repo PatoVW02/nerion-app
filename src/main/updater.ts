@@ -1,7 +1,28 @@
+import { execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { loadSettings } from './settings'
 import { setQuitting } from './background'
+
+/**
+ * Returns 'universal', 'arm64', or 'x64' by inspecting the running binary
+ * with `lipo`. This is the only reliable way to distinguish a universal build
+ * from an arm64-only build at runtime (both report process.arch === 'arm64'
+ * on Apple Silicon).
+ */
+function detectBuildArch(): 'universal' | 'arm64' | 'x64' {
+  if (process.platform === 'darwin') {
+    try {
+      const archs = execFileSync('lipo', ['-archs', process.execPath], { timeout: 3000 })
+        .toString()
+        .trim()
+      if (archs.includes('arm64') && archs.includes('x86_64')) return 'universal'
+    } catch {
+      // lipo unavailable or failed — fall through to process.arch
+    }
+  }
+  return process.arch === 'arm64' ? 'arm64' : 'x64'
+}
 
 let listenersRegistered = false
 let checkInFlight = false
@@ -94,9 +115,10 @@ export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' 
 
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.channel = detectBuildArch()
     downloadedUpdateReady = false
 
-    console.log(`[Vectra] Auto-update check (${reason}): checking provider feed from ${currentVersion}.`)
+    console.log(`[Vectra] Auto-update check (${reason}): channel=${autoUpdater.channel}, checking from ${currentVersion}.`)
     const result = await autoUpdater.checkForUpdates()
     const nextVersion = result?.updateInfo?.version
     if (!nextVersion || compareSemver(nextVersion, currentVersion) <= 0) {
