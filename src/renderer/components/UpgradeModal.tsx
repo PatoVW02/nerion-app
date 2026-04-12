@@ -39,7 +39,7 @@ export function UpgradeModal({ onClose, onActivate }: UpgradeModalProps) {
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className={[
-        'relative w-full max-w-[560px] mx-4 bg-zinc-950 border border-white/10 rounded-2xl shadow-2xl overflow-hidden',
+        'relative w-full max-w-[560px] mx-4 bg-zinc-900/80 backdrop-blur-2xl border border-white/[0.12] rounded-2xl shadow-2xl overflow-hidden',
         'transition-all duration-200 ease-out',
         entered ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[0.98]'
       ].join(' ')}>

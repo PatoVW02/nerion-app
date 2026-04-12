@@ -505,7 +505,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
                   'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors inline-flex items-center gap-1.5',
                   activeTab === tab.id
                     ? 'bg-blue-600 text-white'
-                    : 'bg-white/[0.04] text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.08]'
+                    : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.06]'
                 ].join(' ')}
               >
                 {tab.label}

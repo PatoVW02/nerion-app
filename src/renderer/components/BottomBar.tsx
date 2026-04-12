@@ -37,7 +37,7 @@ export function BottomBar({
     : (activeScanPath.split('/').filter(Boolean).pop() ?? activeScanPath)
 
   return (
-    <div className="shrink-0 border-t border-white/5 px-4 py-3 flex flex-col items-center gap-1.5">
+    <div className="shrink-0 border-t border-white/[0.08] px-4 py-3 flex flex-col items-center gap-1.5 bg-zinc-950/70 backdrop-blur-xl">
       <div className="flex items-center gap-2">
         {cleanableCount > 0 && (
           <button

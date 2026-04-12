@@ -1,6 +1,6 @@
 {
   "name": "vectra",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "macOS disk space analyzer",
   "author": "patovw",
   "email": "hey@patovw.com",
@@ -9,9 +9,14 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "dist": "npm run build:scanner && npm run build && electron-builder",
+    "dist": "npm run build:scanner && npm run build && electron-builder --arm64",
+    "dist:arm64": "npm run build:scanner && npm run build && electron-builder --arm64",
+    "dist:x64": "npm run build:scanner:x64 && npm run build && electron-builder --x64",
+    "dist:universal": "npm run build:scanner:universal && npm run build && electron-builder --universal",
     "typecheck": "tsc --noEmit",
-    "build:scanner": "swiftc -O -o resources/scanner-bin resources/scanner/main.swift && chmod +x resources/scanner-bin"
+    "build:scanner": "swiftc -O -target arm64-apple-macos13 -o resources/scanner-bin resources/scanner/main.swift && chmod +x resources/scanner-bin",
+    "build:scanner:x64": "swiftc -O -target x86_64-apple-macos13 -o resources/scanner-bin resources/scanner/main.swift && chmod +x resources/scanner-bin",
+    "build:scanner:universal": "swiftc -O -target arm64-apple-macos13 -o resources/scanner-bin-arm64 resources/scanner/main.swift && swiftc -O -target x86_64-apple-macos13 -o resources/scanner-bin-x86_64 resources/scanner/main.swift && lipo -create resources/scanner-bin-arm64 resources/scanner-bin-x86_64 -output resources/scanner-bin && chmod +x resources/scanner-bin && rm resources/scanner-bin-arm64 resources/scanner-bin-x86_64"
   },
   "dependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",
@@ -36,13 +41,14 @@
   "build": {
     "appId": "com.patricio.vectra",
     "productName": "Vectra",
-    "artifactName": "Vectra.${ext}",
+    "artifactName": "Vectra-${arch}.${ext}",
     "mac": {
       "target": [
-        "dmg",
-        "zip"
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
       ],
-      "category": "public.app-category.utilities"
+      "category": "public.app-category.utilities",
+      "x64ArchFiles": "scanner-bin"
     },
     "files": [
       "out/**/*"
