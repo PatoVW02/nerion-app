@@ -25,6 +25,10 @@ interface SmartCleanPanelProps {
   initialLeftoverSelection: Set<string> | null
   /** Called with the current leftover selection so the caller can persist it. */
   onClose: (leftoverSelection: Set<string>) => void
+  /** Whether the user has an active license. False → preview mode (read-only). */
+  isPremium: boolean
+  /** Opens the upgrade/paywall modal. Called from the preview-mode footer CTA. */
+  onUpgrade: () => void
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -186,9 +190,11 @@ interface TreeItemProps {
   onRevealInFinder: (path: string) => void
   /** True when an ancestor cleanable node is already selected — this node is implicitly covered. */
   parentSelected?: boolean
+  /** Preview mode: show items but block all selection interactions. */
+  disabled?: boolean
 }
 
-const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, onInfo, onRevealInFinder, parentSelected }: TreeItemProps) {
+const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, onInfo, onRevealInFinder, parentSelected, disabled }: TreeItemProps) {
   const [expanded, setExpanded] = useState(depth === 0 && node.children.length <= 8)
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null)
 
@@ -285,10 +291,12 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
         {/* Checkbox — cleanable leaf OR batch-select for intermediate nodes */}
         {node.isCleanable && node.entry ? (
           <button
-            onClick={hasChildren ? handleCleanableToggle : () => onToggle(node.path, node.entry!)}
+            onClick={disabled ? undefined : (hasChildren ? handleCleanableToggle : () => onToggle(node.path, node.entry!))}
             className={[
               'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
-              allSelfAndDescendantsSelected
+              disabled
+                ? 'border-zinc-700 bg-transparent opacity-40 cursor-not-allowed'
+                : allSelfAndDescendantsSelected
                 ? 'bg-blue-600 border-blue-600'
                 : someSelfOrDescendantsSelected
                 ? 'bg-blue-900/60 border-blue-500'
@@ -308,10 +316,12 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
           </button>
         ) : cleanableDescendants && cleanableDescendants.length > 0 ? (
           <button
-            onClick={handleBatchToggle}
+            onClick={disabled ? undefined : handleBatchToggle}
             className={[
               'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
-              allDescendantsSelected
+              disabled
+                ? 'border-zinc-700 bg-transparent opacity-40 cursor-not-allowed'
+                : allDescendantsSelected
                 ? 'bg-blue-600 border-blue-600'
                 : cleanableDescendants.some((d) => selectedPaths.has(d.path))
                 ? 'bg-blue-900/60 border-blue-500'
@@ -341,7 +351,7 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
 
         {/* Label + size */}
         <button
-          onClick={() => {
+          onClick={disabled ? undefined : () => {
             if (!node.isCleanable || !node.entry) return
             if (hasChildren) handleCleanableToggle()
             else onToggle(node.path, node.entry)
@@ -371,6 +381,7 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
           onInfo={onInfo}
           onRevealInFinder={onRevealInFinder}
           parentSelected={checked || undefined}
+          disabled={disabled}
         />
       ))}
 
@@ -406,9 +417,10 @@ interface LeftoverRowProps {
   onToggle: () => void
   onReveal: () => void
   onInfo: (entry: DiskEntry) => void
+  disabled?: boolean
 }
 
-function LeftoverRow({ item, checked, onToggle, onReveal, onInfo }: LeftoverRowProps) {
+function LeftoverRow({ item, checked, onToggle, onReveal, onInfo, disabled }: LeftoverRowProps) {
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null)
   const isDir = !item.name.endsWith('.plist')
 
@@ -427,13 +439,15 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo }: LeftoverRowP
         onContextMenu={(e) => { e.preventDefault(); setCtx({ x: e.clientX, y: e.clientY }) }}
       >
         <button
-          onClick={onToggle}
+          onClick={disabled ? undefined : onToggle}
           className={[
             'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
-            checked ? 'bg-blue-600 border-blue-600' : 'border-zinc-600 bg-transparent'
+            disabled
+              ? 'border-zinc-700 bg-transparent opacity-40 cursor-not-allowed'
+              : checked ? 'bg-blue-600 border-blue-600' : 'border-zinc-600 bg-transparent'
           ].join(' ')}
         >
-          {checked && (
+          {!disabled && checked && (
             <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
             </svg>
@@ -442,7 +456,7 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo }: LeftoverRowP
 
         {isDir ? <FolderIcon /> : <FileIcon />}
 
-        <button onClick={onToggle} className="flex-1 min-w-0 text-left">
+        <button onClick={disabled ? undefined : onToggle} className="flex-1 min-w-0 text-left">
           <div className="flex items-center justify-between gap-1">
             <span className="text-xs font-medium text-zinc-200 truncate">{item.name}</span>
             <span className="text-[10px] text-zinc-600 tabular-nums shrink-0">{formatSize(item.sizeKB)}</span>
@@ -481,7 +495,9 @@ export function SmartCleanPanel({
   onInfo,
   onRevealInFinder,
   initialLeftoverSelection,
-  onClose
+  onClose,
+  isPremium,
+  onUpgrade,
 }: SmartCleanPanelProps) {
   const [mounted, setMounted] = useState(false)
 
@@ -615,6 +631,14 @@ export function SmartCleanPanel({
     return { totalSelectedKB: kb, totalSelectedCount: count }
   }, [treeEntries, selectedPaths, leftovers, selectedLeftovers])
 
+  // Preview mode: total of every top-level item in the panel (what "Select All" would give).
+  const { totalAvailableKB, totalAvailableCount } = useMemo(() => {
+    let kb = 0, count = 0
+    for (const e of allEntries) { kb += e.sizeKB; count++ }
+    for (const l of leftovers)  { kb += l.sizeKB; count++ }
+    return { totalAvailableKB: kb, totalAvailableCount: count }
+  }, [allEntries, leftovers])
+
   // "Select all" tracks only top-level cleanable entries — children are opt-in
   const allScanSelected = useMemo(
     () => allEntries.length > 0 && allEntries.every((e) => selectedPaths.has(e.path)),
@@ -675,25 +699,42 @@ export function SmartCleanPanel({
         </div>
 
         <div className="flex items-center justify-between mt-2.5">
-          <span className="text-xs text-zinc-500">
-            {totalSelectedCount > 0
-              ? `${totalSelectedCount} selected · ${formatSize(totalSelectedKB)}`
-              : 'Nothing selected'}
-          </span>
-          <button
-            onClick={() => {
-              if (allScanSelected && allLeftoversSelected) {
-                onDeselectAll()
-                setSelectedLeftovers(new Set())
-              } else {
-                onSelectAll()
-                setSelectedLeftovers(new Set(leftovers.map((l) => l.path)))
-              }
-            }}
-            className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-          >
-            {(allScanSelected && allLeftoversSelected) ? 'Deselect All' : 'Select All'}
-          </button>
+          {isPremium ? (
+            <span className="text-xs text-zinc-500">
+              {totalSelectedCount > 0
+                ? `${totalSelectedCount} selected · ${formatSize(totalSelectedKB)}`
+                : 'Nothing selected'}
+            </span>
+          ) : (
+            <span className="text-xs text-zinc-500">
+              {totalAvailableCount > 0
+                ? `${totalAvailableCount} ${totalAvailableCount === 1 ? 'item' : 'items'} · ${formatSize(totalAvailableKB)} available`
+                : leftoversLoading ? 'Scanning…' : 'Nothing to clean'}
+            </span>
+          )}
+          {isPremium ? (
+            <button
+              onClick={() => {
+                if (allScanSelected && allLeftoversSelected) {
+                  onDeselectAll()
+                  setSelectedLeftovers(new Set())
+                } else {
+                  onSelectAll()
+                  setSelectedLeftovers(new Set(leftovers.map((l) => l.path)))
+                }
+              }}
+              className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+            >
+              {(allScanSelected && allLeftoversSelected) ? 'Deselect All' : 'Select All'}
+            </button>
+          ) : (
+            <span className="flex items-center gap-1 text-xs text-zinc-600">
+              <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+              </svg>
+              Preview
+            </span>
+          )}
         </div>
       </div>
 
@@ -706,8 +747,8 @@ export function SmartCleanPanel({
             title="Caches & Temp"
             collapsed={cachesCollapsed}
             onToggleCollapse={() => setCachesCollapsed(v => !v)}
-            selectLabel={allScanSelected ? 'Deselect' : 'Select all'}
-            onSelect={allScanSelected ? onDeselectAll : onSelectAll}
+            selectLabel={isPremium ? (allScanSelected ? 'Deselect' : 'Select all') : undefined}
+            onSelect={isPremium ? (allScanSelected ? onDeselectAll : onSelectAll) : undefined}
           >
             {systemTree.map((node) => (
               <TreeItem
@@ -718,6 +759,7 @@ export function SmartCleanPanel({
                 onToggle={onToggle}
                 onInfo={onInfo}
                 onRevealInFinder={onRevealInFinder}
+                disabled={!isPremium}
               />
             ))}
           </SectionBlock>
@@ -739,6 +781,7 @@ export function SmartCleanPanel({
                 onToggle={onToggle}
                 onInfo={onInfo}
                 onRevealInFinder={onRevealInFinder}
+                disabled={!isPremium}
               />
             ))}
           </SectionBlock>
@@ -749,8 +792,8 @@ export function SmartCleanPanel({
           title="App Leftovers"
           collapsed={leftoversCollapsed}
           onToggleCollapse={() => setLeftoversCollapsed(v => !v)}
-          selectLabel={!leftoversLoading && leftovers.length > 0 ? (allLeftoversSelected ? 'Deselect' : 'Select all') : undefined}
-          onSelect={!leftoversLoading && leftovers.length > 0 ? () => {
+          selectLabel={isPremium && !leftoversLoading && leftovers.length > 0 ? (allLeftoversSelected ? 'Deselect' : 'Select all') : undefined}
+          onSelect={isPremium && !leftoversLoading && leftovers.length > 0 ? () => {
             if (allLeftoversSelected) setSelectedLeftovers(new Set())
             else setSelectedLeftovers(new Set(leftovers.map((l) => l.path)))
           } : undefined}
@@ -773,6 +816,7 @@ export function SmartCleanPanel({
                 onToggle={() => toggleLeftover(item.path)}
                 onReveal={() => window.electronAPI.revealInFinder(item.path)}
                 onInfo={onInfo}
+                disabled={!isPremium}
               />
             ))
           )}
@@ -787,20 +831,32 @@ export function SmartCleanPanel({
 
       {/* Footer */}
       <div className="shrink-0 border-t border-white/5 px-4 py-3 flex flex-col gap-2">
-        <button
-          onClick={handleAddToSelection}
-          disabled={totalSelectedCount === 0}
-          className="w-full py-2 rounded-lg bg-blue-600/80 hover:bg-blue-600 disabled:opacity-30 disabled:cursor-not-allowed text-xs text-white font-medium transition-colors"
-        >
-          {totalSelectedCount > 0
-            ? `Add ${totalSelectedCount} ${totalSelectedCount === 1 ? 'item' : 'items'} to Selection`
-            : 'Add to Selection'}
-        </button>
+        {isPremium ? (
+          <button
+            onClick={handleAddToSelection}
+            disabled={totalSelectedCount === 0}
+            className="w-full py-2 rounded-lg bg-blue-600/80 hover:bg-blue-600 disabled:opacity-30 disabled:cursor-not-allowed text-xs text-white font-medium transition-colors"
+          >
+            {totalSelectedCount > 0
+              ? `Add ${totalSelectedCount} ${totalSelectedCount === 1 ? 'item' : 'items'} to Selection`
+              : 'Add to Selection'}
+          </button>
+        ) : (
+          <button
+            onClick={onUpgrade}
+            className="w-full py-2 rounded-lg bg-violet-600/80 hover:bg-violet-600 text-xs text-white font-medium transition-colors flex items-center justify-center gap-1.5"
+          >
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+            </svg>
+            Unlock to Clean {totalAvailableCount > 0 ? `${totalAvailableCount} ${totalAvailableCount === 1 ? 'Item' : 'Items'}` : ''}
+          </button>
+        )}
         <button
           onClick={() => onClose(selectedLeftovers)}
           className="w-full py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-zinc-400 transition-colors"
         >
-          Cancel
+          {isPremium ? 'Cancel' : 'Close'}
         </button>
       </div>
     </div>

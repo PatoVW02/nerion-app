@@ -427,9 +427,8 @@ function AppShell() {
   // ── Smart clean ───────────────────────────────────────────────────────────
 
   const handleSmartClean = useCallback(() => {
-    if (!isPremium) { setUpgradeOpen(true); return }
-    if (!smartCleanEverOpened.current) {
-      // First open only: auto-select based on the dev-dependency setting.
+    if (isPremium && !smartCleanEverOpened.current) {
+      // First open only (premium): auto-select based on the dev-dependency setting.
       setSelectedPaths((prev) => new Map([...prev, ...autoSelectableCleanable]))
       smartCleanEverOpened.current = true
     }
@@ -685,6 +684,8 @@ function AppShell() {
                     onInfo={setInfoPanelEntry}
                     onRevealInFinder={(p) => window.electronAPI.revealInFinder(p)}
                     initialLeftoverSelection={savedLeftoverSelection}
+                    isPremium={isPremium}
+                    onUpgrade={() => setUpgradeOpen(true)}
                     onClose={(leftoverSel) => {
                       setSavedLeftoverSelection(leftoverSel)
                       setSmartCleanOpen(false)

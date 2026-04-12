@@ -1,24 +1,35 @@
-import { execFileSync } from 'child_process'
+import { openSync, readSync, closeSync } from 'fs'
 import { app, BrowserWindow } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { loadSettings } from './settings'
 import { setQuitting } from './background'
 
 /**
- * Returns 'universal', 'arm64', or 'x64' by inspecting the running binary
- * with `lipo`. This is the only reliable way to distinguish a universal build
- * from an arm64-only build at runtime (both report process.arch === 'arm64'
- * on Apple Silicon).
+ * Returns 'universal', 'arm64', or 'x64' by reading the first 8 bytes of the
+ * running Mach-O binary. No external tools required.
+ *
+ * Fat (universal) binary:  magic = 0xCAFEBABE  (big-endian, bytes 0-3)
+ * Thin 64-bit binary:      magic = 0xFEEDFACF  (little-endian, bytes 0-3)
+ *   CPU_TYPE_ARM64  = 0x0100000C  (bytes 4-7)
+ *   CPU_TYPE_X86_64 = 0x01000007  (bytes 4-7)
  */
 function detectBuildArch(): 'universal' | 'arm64' | 'x64' {
   if (process.platform === 'darwin') {
     try {
-      const archs = execFileSync('lipo', ['-archs', process.execPath], { timeout: 3000 })
-        .toString()
-        .trim()
-      if (archs.includes('arm64') && archs.includes('x86_64')) return 'universal'
+      const buf = Buffer.alloc(8)
+      const fd = openSync(process.execPath, 'r')
+      readSync(fd, buf, 0, 8, 0)
+      closeSync(fd)
+
+      if (buf.readUInt32BE(0) === 0xcafebabe) return 'universal'
+
+      if (buf.readUInt32LE(0) === 0xfeedfacf) {
+        const cpuType = buf.readUInt32LE(4)
+        if (cpuType === 0x0100000c) return 'arm64'
+        if (cpuType === 0x01000007) return 'x64'
+      }
     } catch {
-      // lipo unavailable or failed — fall through to process.arch
+      // unreadable — fall through to process.arch
     }
   }
   return process.arch === 'arm64' ? 'arm64' : 'x64'
