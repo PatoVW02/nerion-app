@@ -456,14 +456,20 @@ export function registerIpcHandlers(): void {
       }
     }
 
-    // Deduplicate while preserving order
+    // Deduplicate exact duplicates while preserving order
     const seen = new Set<string>()
-    const effectivePaths: string[] = []
+    const deduped: string[] = []
     for (const targetPath of expandedTargets) {
       if (seen.has(targetPath)) continue
       seen.add(targetPath)
-      effectivePaths.push(targetPath)
+      deduped.push(targetPath)
     }
+
+    // Remove paths whose ancestor is also in the list — deleting the parent
+    // already removes them, so trying to delete them separately causes "doesn't exist" errors.
+    const effectivePaths = deduped.filter(p =>
+      !deduped.some(other => other !== p && p.startsWith(other.endsWith('/') ? other : other + path.sep))
+    )
 
     const requested = Math.max(0, effectivePaths.length)
     const premium = getLicenseInfo().active
@@ -488,8 +494,11 @@ export function registerIpcHandlers(): void {
       try {
         await shell.trashItem(p)
         deletedCount += 1
+        _event.sender.send('trash-progress', { path: p, success: true })
       } catch (err) {
-        errors.push(String(err))
+        const msg = String(err)
+        errors.push(msg)
+        _event.sender.send('trash-progress', { path: p, success: false, error: msg })
       }
     }
 

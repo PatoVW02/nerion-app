@@ -47,6 +47,8 @@ export function useTreeScanner(rootPath: string | null, scanTrigger: number, sca
   const removeEntries = useCallback((paths: string[]) => {
     const pathSet = new Set(paths)
     let changed = false
+
+    // Remove entries that appear as children inside their parent bucket
     for (const [dirPath, entries] of internalTree.current) {
       const filtered = entries.filter(e => !pathSet.has(e.path))
       if (filtered.length !== entries.length) {
@@ -54,6 +56,17 @@ export function useTreeScanner(rootPath: string | null, scanTrigger: number, sca
         changed = true
       }
     }
+
+    // Also remove directory buckets for deleted paths and all their descendants.
+    // Without this, deleting ".venv" leaves the ".venv" bucket (and sub-buckets)
+    // in internalTree, so their children keep appearing in SmartClean / ReviewPanel.
+    for (const dirPath of [...internalTree.current.keys()]) {
+      if (pathSet.has(dirPath) || [...pathSet].some(p => dirPath.startsWith(p + '/'))) {
+        internalTree.current.delete(dirPath)
+        changed = true
+      }
+    }
+
     if (changed) {
       setState(prev => ({ ...prev, tree: new Map(internalTree.current) }))
     }

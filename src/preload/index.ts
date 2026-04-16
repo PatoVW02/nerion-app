@@ -38,6 +38,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   revealInFinder: (path: string) => ipcRenderer.invoke('reveal-in-finder', path),
   trashEntries: (paths: string[]) => ipcRenderer.invoke('trash-entries', paths),
+  onTrashProgress: (cb: (data: { path: string; success: boolean; error?: string }) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { path: string; success: boolean; error?: string }) => cb(data)
+    ipcRenderer.on('trash-progress', handler)
+    return () => ipcRenderer.off('trash-progress', handler)
+  },
   getItemStats: (path: string) => ipcRenderer.invoke('get-item-stats', path),
 
   // ── App leftover detection ────────────────────────────────────────────────

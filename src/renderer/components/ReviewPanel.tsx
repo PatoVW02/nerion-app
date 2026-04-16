@@ -84,11 +84,11 @@ function getSelectableDescendants(node: TreeNode): string[] {
   return result
 }
 
-/** Returns true when every selectable item under this node is in removingPaths. */
-function allNodeRemoving(node: TreeNode, removingPaths: Set<string>): boolean {
-  if (node.isCleanable && node.entry) return removingPaths.has(node.path)
+/** Returns true when every selectable item under this node is animating out or confirmed deleted. */
+function allNodeRemoving(node: TreeNode, removingOrConfirmed: Set<string>): boolean {
+  if (node.isCleanable && node.entry) return removingOrConfirmed.has(node.path)
   if (node.children.length === 0) return false
-  return node.children.every(c => allNodeRemoving(c, removingPaths))
+  return node.children.every(c => allNodeRemoving(c, removingOrConfirmed))
 }
 
 // ─── Tree item (recursive, mirrors SmartCleanPanel's TreeItem) ────────────────
@@ -99,6 +99,7 @@ interface ReviewTreeItemProps {
   homeDir: string
   selected: Set<string>
   removingPaths: Set<string>
+  confirmedDeletedPaths: Set<string>
   deleting: boolean
   onToggle: (path: string) => void
   /** Incremented to trigger a global expand (expanded=true) or collapse (expanded=false). */
@@ -106,7 +107,7 @@ interface ReviewTreeItemProps {
 }
 
 const ReviewTreeItem = memo(function ReviewTreeItem({
-  node, depth, homeDir, selected, removingPaths, deleting, onToggle, expandKey,
+  node, depth, homeDir, selected, removingPaths, confirmedDeletedPaths, deleting, onToggle, expandKey,
 }: ReviewTreeItemProps) {
   const [expanded, setExpanded] = useState(true)
 
@@ -164,9 +165,15 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
 
   // Fade-out animation for leaf items being deleted
   const removing = node.isCleanable && !!node.entry && removingPaths.has(node.path)
+  // Confirmed deleted: already gone — collapse instantly with no animation
+  const confirmed = node.isCleanable && !!node.entry && confirmedDeletedPaths.has(node.path)
 
-  // Hide entire subtree once all its selectable items are going away
-  if (!node.isCleanable && node.children.length > 0 && allNodeRemoving(node, removingPaths)) {
+  // Hide entire subtree once all its selectable items are animating out or confirmed deleted
+  const removingOrConfirmed = useMemo(
+    () => new Set([...removingPaths, ...confirmedDeletedPaths]),
+    [removingPaths, confirmedDeletedPaths]
+  )
+  if (!node.isCleanable && node.children.length > 0 && allNodeRemoving(node, removingOrConfirmed)) {
     return null
   }
 
@@ -175,7 +182,9 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
       <div
         className={[
           'flex items-center gap-1.5 py-2 hover:bg-white/[0.04] transition-colors',
-          removing
+          confirmed
+            ? 'hidden'
+            : removing
             ? 'opacity-0 overflow-hidden max-h-0 py-0 pointer-events-none transition-all duration-300 ease-out'
             : '',
         ].filter(Boolean).join(' ')}
@@ -292,6 +301,7 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
           homeDir={homeDir}
           selected={selected}
           removingPaths={removingPaths}
+          confirmedDeletedPaths={confirmedDeletedPaths}
           deleting={deleting}
           onToggle={onToggle}
           expandKey={expandKey}
@@ -307,13 +317,15 @@ interface ReviewPanelProps {
   entries: DiskEntry[]
   isPremium: boolean
   remainingQuota: number
+  /** Paths confirmed actually deleted so far — used to update the tree live during deletion. */
+  confirmedDeletedPaths: Set<string>
   onConfirm: (paths: string[], totalKB: number) => Promise<string | null>
   onCancel: () => void
   onDone: () => void
   onUpgradeClick: () => void
 }
 
-export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onCancel, onDone, onUpgradeClick }: ReviewPanelProps) {
+export function ReviewPanel({ entries, isPremium, remainingQuota, confirmedDeletedPaths, onConfirm, onCancel, onDone, onUpgradeClick }: ReviewPanelProps) {
   const selectableInReview = entries.filter(
     (e) => !isCriticalPath(e.path) || isContentOnlyProtectedRoot(e.path),
   )
@@ -365,7 +377,12 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
   }, [allChecked, selectableInReview])
 
   const selectedEntries = entries.filter(e => selected.has(e.path))
-  const totalSelectedKB = selectedEntries.reduce((s, e) => s + e.sizeKB, 0)
+  // Deduplicate sizes: if both a parent folder and a child are selected,
+  // the parent's sizeKB already includes the child — only count the parent.
+  const selectedEntriesDeduped = selectedEntries.filter(
+    e => !selectedEntries.some(other => other.path !== e.path && e.path.startsWith(other.path + '/'))
+  )
+  const totalSelectedKB = selectedEntriesDeduped.reduce((s, e) => s + e.sizeKB, 0)
   const exceedsRemainingQuota = !isPremium && selectedEntries.length > remainingQuota
   const freeTierOverLimitMessage = exceedsRemainingQuota
     ? `You have ${remainingQuota} ${remainingQuota === 1 ? 'delete' : 'deletes'} remaining this month. Deselect ${selectedEntries.length - remainingQuota} item${selectedEntries.length - remainingQuota === 1 ? '' : 's'} to continue, or upgrade for unlimited deletes.`
@@ -382,7 +399,7 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
     
     const toDelete = [...selectedEntries]
     setError(null)
-    setFreedKB(toDelete.reduce((s, e) => s + e.sizeKB, 0))
+    setFreedKB(selectedEntriesDeduped.reduce((s, e) => s + e.sizeKB, 0))
     setPhase('deleting')
 
     // Stagger items out: cap total animation at 700 ms
@@ -411,7 +428,7 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
 
     // Show done state after last animation finishes
     setTimeout(() => setPhase('done'), toDelete.length * stagger + 380)
-  }, [phase, selectedEntries, freeTierOverLimitMessage, onConfirm, onUpgradeClick])
+  }, [phase, selectedEntries, selectedEntriesDeduped, freeTierOverLimitMessage, onConfirm, onUpgradeClick])
 
   return createPortal(
     <div
@@ -524,6 +541,7 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
                 homeDir={homeDir}
                 selected={selected}
                 removingPaths={removingPaths}
+                confirmedDeletedPaths={confirmedDeletedPaths}
                 deleting={phase === 'deleting'}
                 onToggle={toggle}
                 expandKey={expandKey}
@@ -556,15 +574,20 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, onConfirm, onC
                 disabled={selectedEntries.length === 0 || phase === 'deleting'}
                 className="w-full py-2 rounded-lg bg-red-600/80 hover:bg-red-600 disabled:opacity-30 disabled:cursor-not-allowed text-xs text-white font-medium transition-colors flex items-center justify-center gap-2"
               >
-                {phase === 'deleting' ? (
-                  <>
-                    <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Moving to Trash…
-                  </>
-                ) : (
+                {phase === 'deleting' ? (() => {
+                  const remaining = selectedEntries.length - confirmedDeletedPaths.size
+                  return (
+                    <>
+                      <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                      {remaining > 0
+                        ? `Moving to Trash… ${confirmedDeletedPaths.size} of ${selectedEntries.length}`
+                        : 'Finishing up…'}
+                    </>
+                  )
+                })() : (
                   `Move ${selectedEntries.length} ${selectedEntries.length === 1 ? 'item' : 'items'} to Trash · ${formatSize(totalSelectedKB)}`
                 )}
               </button>

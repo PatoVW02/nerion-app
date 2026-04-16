@@ -88,6 +88,7 @@ declare global {
       openDirectory: () => Promise<string | null>
       revealInFinder: (path: string) => Promise<void>
       trashEntries: (paths: string[]) => Promise<string | null>
+      onTrashProgress: (cb: (data: { path: string; success: boolean; error?: string }) => void) => () => void
       getItemStats: (path: string) => Promise<ItemStats | { error: string }>
 
       // App leftover detection

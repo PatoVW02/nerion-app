@@ -29,6 +29,8 @@ interface SmartCleanPanelProps {
   isPremium: boolean
   /** Opens the upgrade/paywall modal. Called from the preview-mode footer CTA. */
   onUpgrade: () => void
+  /** Paths confirmed deleted during an active deletion — used to update lists live. */
+  confirmedDeletedPaths: Set<string>
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -498,6 +500,7 @@ export function SmartCleanPanel({
   onClose,
   isPremium,
   onUpgrade,
+  confirmedDeletedPaths,
 }: SmartCleanPanelProps) {
   const [mounted, setMounted] = useState(false)
 
@@ -518,6 +521,17 @@ export function SmartCleanPanel({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, selectedLeftovers])
+
+  // Strip confirmed-deleted paths from leftovers + selectedLeftovers as they happen
+  useEffect(() => {
+    if (confirmedDeletedPaths.size === 0) return
+    setLeftovers(prev => prev.filter(l => !confirmedDeletedPaths.has(l.path)))
+    setSelectedLeftovers(prev => {
+      const next = new Set(prev)
+      for (const p of confirmedDeletedPaths) next.delete(p)
+      return next
+    })
+  }, [confirmedDeletedPaths])
 
   // Fetch leftovers on mount
   useEffect(() => {
@@ -552,17 +566,21 @@ export function SmartCleanPanel({
   // We build two completely separate trees so intermediate ancestor nodes never mix
   // system and dev content — which would cause everything to collapse into one section.
   const systemEntries = useMemo(
-    () => [...allCleanable.values()].filter(e => e.sizeKB > 0 && !isDevDependency(e)),
-    [allCleanable]
+    () => [...allCleanable.values()].filter(
+      e => e.sizeKB > 0 && !isDevDependency(e) && !confirmedDeletedPaths.has(e.path)
+    ),
+    [allCleanable, confirmedDeletedPaths]
   )
   const devEntries = useMemo(() => {
-    const fromCleanable = [...allCleanable.values()].filter(e => e.sizeKB > 0 && isDevDependency(e))
+    const fromCleanable = [...allCleanable.values()].filter(
+      e => e.sizeKB > 0 && isDevDependency(e) && !confirmedDeletedPaths.has(e.path)
+    )
     // Also include dev deps that were manually selected from the treemap but aren't in allCleanable
     // (this happens when the "show dev dependencies" setting is off)
     const seen = new Set(fromCleanable.map(e => e.path))
     const extra: DiskEntry[] = []
     for (const path of selectedPaths) {
-      if (seen.has(path)) continue
+      if (seen.has(path) || confirmedDeletedPaths.has(path)) continue
       const entry = entryByPath.get(path)
       if (entry && entry.sizeKB > 0 && isDevDependency(entry)) {
         extra.push(entry)
@@ -570,7 +588,7 @@ export function SmartCleanPanel({
       }
     }
     return [...fromCleanable, ...extra]
-  }, [allCleanable, selectedPaths, entryByPath])
+  }, [allCleanable, selectedPaths, entryByPath, confirmedDeletedPaths])
 
   // Direct children of system cleanable dirs — individually selectable sub-items.
   const { systemChildEntries, systemChildPaths } = useMemo(() => {
@@ -579,14 +597,14 @@ export function SmartCleanPanel({
     for (const entry of systemEntries) {
       if (!entry.isDir) continue
       for (const child of fullTree.get(entry.path) ?? []) {
-        if (!allCleanable.has(child.path) && child.sizeKB > 0) {
+        if (!allCleanable.has(child.path) && child.sizeKB > 0 && !confirmedDeletedPaths.has(child.path) && child.name !== '.DS_Store') {
           extra.push(child)
           extraPaths.add(child.path)
         }
       }
     }
     return { systemChildEntries: extra, systemChildPaths: extraPaths }
-  }, [systemEntries, fullTree, allCleanable])
+  }, [systemEntries, fullTree, allCleanable, confirmedDeletedPaths])
 
   // Dev dep entries aren't recognised by isCleanable() so pass their paths explicitly.
   const devSelectablePaths = useMemo(
@@ -639,7 +657,16 @@ export function SmartCleanPanel({
     return { totalAvailableKB: kb, totalAvailableCount: count }
   }, [allEntries, leftovers])
 
-  // "Select all" tracks only top-level cleanable entries — children are opt-in
+  // Per-section "all selected" state
+  const allSystemSelected = useMemo(
+    () => systemEntries.length > 0 && systemEntries.every(e => selectedPaths.has(e.path)),
+    [systemEntries, selectedPaths]
+  )
+  const allDevSelected = useMemo(
+    () => devEntries.length > 0 && devEntries.every(e => selectedPaths.has(e.path)),
+    [devEntries, selectedPaths]
+  )
+  // Used by the global header "Select All" button (covers both sections)
   const allScanSelected = useMemo(
     () => allEntries.length > 0 && allEntries.every((e) => selectedPaths.has(e.path)),
     [allEntries, selectedPaths]
@@ -648,6 +675,22 @@ export function SmartCleanPanel({
     () => leftovers.length > 0 && leftovers.every((l) => selectedLeftovers.has(l.path)),
     [leftovers, selectedLeftovers]
   )
+
+  const selectAllSystem = useCallback(() => {
+    for (const e of systemEntries) if (!selectedPaths.has(e.path)) onToggle(e.path, e)
+  }, [systemEntries, selectedPaths, onToggle])
+
+  const deselectAllSystem = useCallback(() => {
+    for (const e of systemEntries) if (selectedPaths.has(e.path)) onToggle(e.path, e)
+  }, [systemEntries, selectedPaths, onToggle])
+
+  const selectAllDev = useCallback(() => {
+    for (const e of devEntries) if (!selectedPaths.has(e.path)) onToggle(e.path, e)
+  }, [devEntries, selectedPaths, onToggle])
+
+  const deselectAllDev = useCallback(() => {
+    for (const e of devEntries) if (selectedPaths.has(e.path)) onToggle(e.path, e)
+  }, [devEntries, selectedPaths, onToggle])
 
   const toggleLeftover = useCallback((path: string) => {
     setSelectedLeftovers((prev) => {
@@ -747,8 +790,8 @@ export function SmartCleanPanel({
             title="Caches & Temp"
             collapsed={cachesCollapsed}
             onToggleCollapse={() => setCachesCollapsed(v => !v)}
-            selectLabel={isPremium ? (allScanSelected ? 'Deselect' : 'Select all') : undefined}
-            onSelect={isPremium ? (allScanSelected ? onDeselectAll : onSelectAll) : undefined}
+            selectLabel={isPremium ? (allSystemSelected ? 'Deselect' : 'Select all') : undefined}
+            onSelect={isPremium ? (allSystemSelected ? deselectAllSystem : selectAllSystem) : undefined}
           >
             {systemTree.map((node) => (
               <TreeItem
@@ -771,6 +814,8 @@ export function SmartCleanPanel({
             title="Dev Dependencies"
             collapsed={devCollapsed}
             onToggleCollapse={() => setDevCollapsed(v => !v)}
+            selectLabel={isPremium ? (allDevSelected ? 'Deselect' : 'Select all') : undefined}
+            onSelect={isPremium ? (allDevSelected ? deselectAllDev : selectAllDev) : undefined}
           >
             {devTree.map((node) => (
               <TreeItem

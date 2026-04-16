@@ -112,6 +112,7 @@ function AppShell() {
   const [infoPanelEntry, setInfoPanelEntry] = useState<DiskEntry | null>(null)
   const [smartCleanOpen, setSmartCleanOpen] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [confirmedDeletedPaths, setConfirmedDeletedPaths] = useState<Set<string>>(new Set())
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   // Smart Clean session state — reset on every new scan
@@ -176,7 +177,9 @@ function AppShell() {
   // into the tree (or in deep mode) show everything as normal.
   const currentEntries = useMemo(() => {
     const raw = (currentPath ? tree.get(currentPath) : undefined) ?? []
-    if (!quickScanAllowedPaths || currentPath !== rootPath) return raw
+    const filterDeleted = (entries: DiskEntry[]) =>
+      confirmedDeletedPaths.size === 0 ? entries : entries.filter(e => !confirmedDeletedPaths.has(e.path))
+    if (!quickScanAllowedPaths || currentPath !== rootPath) return filterDeleted(raw)
     // At the quick scan root: Library subfolder entries + home-relative entries + custom absolute entries
     const libraryEntries = raw.filter(e => quickScanAllowedPaths.has(e.path))
     const homeEntries: DiskEntry[] = quickScanFolders
@@ -200,8 +203,8 @@ function AppShell() {
         const totalKB = children.reduce((s, e) => s + e.sizeKB, 0)
         return { name: f.split('/').pop() ?? f, path: f, sizeKB: totalKB, isDir: true }
       })
-    return [...libraryEntries, ...homeEntries, ...customEntries].sort((a, b) => b.sizeKB - a.sizeKB)
-  }, [tree, currentPath, rootPath, quickScanAllowedPaths, quickScanFolders, QUICK_SCAN_PATH, homeDir])
+    return filterDeleted([...libraryEntries, ...homeEntries, ...customEntries].sort((a, b) => b.sizeKB - a.sizeKB))
+  }, [tree, currentPath, rootPath, quickScanAllowedPaths, quickScanFolders, QUICK_SCAN_PATH, homeDir, confirmedDeletedPaths])
 
   const allCleanable = useMemo(() => {
     const result = new Map<string, DiskEntry>()
@@ -321,6 +324,7 @@ function AppShell() {
     setScanTrigger(t => t + 1)
     window.electronAPI.updateLastScanPath(path)
     setSelectedPaths(new Map())
+    setConfirmedDeletedPaths(new Set())
     setContextMenu(null)
     setInfoPanelEntry(null)
     setSmartCleanOpen(false)
@@ -475,11 +479,25 @@ function AppShell() {
   const handleConfirmTrash = useCallback(async (paths: string[], totalKB: number) => {
     if (paths.length === 0) return null
 
+    // Stream progress: update tree + selection as each file is confirmed deleted.
+    let deletedCount = 0
+    const unsubscribe = window.electronAPI.onTrashProgress(({ path: p, success }) => {
+      if (success) {
+        deletedCount++
+        removeEntries([p])
+        setSelectedPaths(prev => { const next = new Map(prev); next.delete(p); return next })
+        setConfirmedDeletedPaths(prev => new Set([...prev, p]))
+      }
+    })
+
     const err = await window.electronAPI.trashEntries(paths)
-    if (!err) {
-      removeEntries(paths)
-      window.electronAPI.notifyCleaned(totalKB)
-    }
+    unsubscribe()
+
+    // Notify only if at least some files were actually deleted.
+    // confirmedDeletedPaths is intentionally NOT reset here — it persists until the next scan
+    // so that stale tree entries (from batched IPC flushes or timing races) remain hidden.
+    if (deletedCount > 0) window.electronAPI.notifyCleaned(totalKB)
+
     return err
   }, [removeEntries])
 
@@ -686,6 +704,7 @@ function AppShell() {
                     initialLeftoverSelection={savedLeftoverSelection}
                     isPremium={isPremium}
                     onUpgrade={() => setUpgradeOpen(true)}
+                    confirmedDeletedPaths={confirmedDeletedPaths}
                     onClose={(leftoverSel) => {
                       setSavedLeftoverSelection(leftoverSel)
                       setSmartCleanOpen(false)
@@ -712,6 +731,7 @@ function AppShell() {
           isPremium={isPremium}
           remainingQuota={FREE_DELETE_LIMIT_PER_MONTH - deleteQuotaUsed}
           onConfirm={handleConfirmTrash}
+          confirmedDeletedPaths={confirmedDeletedPaths}
           onCancel={() => setReviewOpen(false)}
           onDone={() => {
             setReviewOpen(false)
