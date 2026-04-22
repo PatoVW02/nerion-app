@@ -1,9 +1,26 @@
 {
   "releases": [
     {
+      "version": "1.2.42",
+      "date": "April 2026",
+      "description": "This update brings cloud-powered AI analysis and a handful of polish fixes to the menu bar and scan engine.",
+      "items": [
+        {
+          "icon": "Cloud",
+          "title": "Cloud AI Analysis",
+          "description": "AI-powered insights on every file now work out of the box, no Ollama required. Local AI is still available as an opt-in in Settings → AI."
+        },
+        {
+          "icon": "Zap",
+          "title": "Bug Fixes & Polish",
+          "description": "We've squashed some bugs and made various small improvements to make your experience smoother and more enjoyable."
+        }
+      ]
+    },
+    {
       "version": "1.2.41",
       "date": "April 2026",
-      "description": "This update brings cloud-powered AI analysis, tighter license security, and a handful of polish fixes to the menu bar and scan engine.",
+      "description": "This update brings cloud-powered AI analysis and a handful of polish fixes to the menu bar and scan engine.",
       "items": [
         {
           "icon": "Cloud",
