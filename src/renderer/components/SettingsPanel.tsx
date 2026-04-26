@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { NerionSettings, OllamaModel, LicenseInfo, UpdaterStatusEvent } from '../types'
 import { formatSize } from '../utils/format'
@@ -8,6 +8,7 @@ import { Sparkles } from 'lucide-react'
 interface SettingsPanelProps {
   onClose: () => void
   onDevDepsChange: (value: boolean) => void
+  onDeleteModeChange: (value: boolean) => void
   quickScanFolders: string[]
   onQuickScanFoldersChange: (folders: string[]) => void
   isPremium: boolean
@@ -74,6 +75,7 @@ const QUICK_FOLDER_OPTIONS = [
   { name: 'Containers',             desc: 'App sandbox containers' },
   { name: 'Downloads',              desc: '~/Downloads folder' },
   { name: 'Desktop',                desc: '~/Desktop folder' },
+  { name: 'Trash',                  desc: '~/.Trash folder' },
   { name: 'Application Support',    desc: 'Persistent app data' },
   { name: 'Saved Application State', desc: 'Saved window & app states' },
   { name: 'Group Containers',       desc: 'Shared app group containers' },
@@ -130,6 +132,17 @@ function fmtEta(seconds: number): string {
   return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`
 }
 
+function fmtDate(value: string | null | undefined): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date)
+}
+
 function Toggle({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
   return (
     <button
@@ -148,7 +161,7 @@ function Toggle({ on, onClick, disabled }: { on: boolean; onClick: () => void; d
   )
 }
 
-export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQuickScanFoldersChange, isPremium, license, onUpgrade, onLicense, onWhatsNew }: SettingsPanelProps) {
+export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, quickScanFolders, onQuickScanFoldersChange, isPremium, license, onUpgrade, onLicense, onWhatsNew }: SettingsPanelProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
   const [settings, setSettings] = useState<NerionSettings | null>(null)
   const [saving, setSaving] = useState(false)
@@ -164,6 +177,12 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
   const [appVersion, setAppVersion] = useState<string | null>(null)
   const [appArch, setAppArch] = useState<string | null>(null)
   const [loginItem, setLoginItem] = useState<boolean | null>(null)
+
+  // Permissions state
+  const [fdaGranted, setFdaGranted] = useState<boolean | null>(null)
+  const [notifGranted, setNotifGranted] = useState<boolean | null>(null)
+  const [fdaPolling, setFdaPolling] = useState(false)
+  const [notifPolling, setNotifPolling] = useState(false)
 
   // AI state
   const [aiEnabled, setAiEnabled] = useState(() => localStorage.getItem('nerion:aiHidden') !== 'true')
@@ -189,7 +208,30 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
     if (window.electronAPI.getAppArch) {
       window.electronAPI.getAppArch().then(setAppArch).catch(() => {})
     }
+    // Check current permission status on open
+    window.electronAPI.checkFullDiskAccess().then(setFdaGranted).catch(() => {})
+    window.electronAPI.checkNotificationPermission().then(setNotifGranted).catch(() => {})
   }, [])
+
+  // Poll FDA every 1.5 s while the user has System Settings open
+  useEffect(() => {
+    if (!fdaPolling || fdaGranted) return
+    const id = setInterval(async () => {
+      const granted = await window.electronAPI.checkFullDiskAccess()
+      if (granted) { setFdaGranted(true); setFdaPolling(false) }
+    }, 1500)
+    return () => clearInterval(id)
+  }, [fdaPolling, fdaGranted])
+
+  // Poll notifications every 1.5 s while the user has System Settings open
+  useEffect(() => {
+    if (!notifPolling || notifGranted) return
+    const id = setInterval(async () => {
+      const granted = await window.electronAPI.checkNotificationPermission()
+      if (granted) { setNotifGranted(true); setNotifPolling(false) }
+    }, 1500)
+    return () => clearInterval(id)
+  }, [notifPolling, notifGranted])
 
   // Register pull listeners once
   useEffect(() => {
@@ -304,8 +346,19 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
     }
   }
 
+  const handleOpenFdaSettings = useCallback(() => {
+    window.electronAPI.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles')
+    setFdaPolling(true)
+  }, [])
+
+  const handleOpenNotifSettings = useCallback(() => {
+    window.electronAPI.openExternal('x-apple.systempreferences:com.apple.preference.notifications')
+    setNotifPolling(true)
+  }, [])
+
   const bg = settings?.backgroundScan
-  const totalKB = bg?.lastScanResults.reduce((s, r) => s + r.sizeKB, 0) ?? 0
+  const totalKB = (bg?.lastScanResults ?? []).reduce((s, r) => s + r.sizeKB, 0)
+  const subscriptionExpiry = fmtDate(license?.expiresAt)
 
   async function toggleBgEnabled() {
     if (!settings) return
@@ -394,6 +447,14 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
     const next = { ...settings, showDevDependencies: !settings.showDevDependencies }
     setSettings(next)
     onDevDepsChange(next.showDevDependencies)
+    await window.electronAPI.saveSettings(next)
+  }
+
+  async function toggleDeleteMode() {
+    if (!settings) return
+    const next = { ...settings, deleteImmediately: !settings.deleteImmediately }
+    setSettings(next)
+    onDeleteModeChange(next.deleteImmediately)
     await window.electronAPI.saveSettings(next)
   }
 
@@ -580,11 +641,11 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
             )}
           </div>
           {/* Subscription expiry notice */}
-          {!isPremium && license && !license.active && license.licenseType === 'subscription' && license.expiresAt && (
+          {!isPremium && license && !license.active && license.licenseType === 'subscription' && subscriptionExpiry && (
             <div className="px-4 py-3 flex items-center justify-between gap-3">
               <p className="text-[11px] text-amber-400/90 leading-snug">
                 Your subscription expired on{' '}
-                {new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(license.expiresAt))}.
+                {subscriptionExpiry}.
                 Renew to restore access.
               </p>
               <button
@@ -907,6 +968,21 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
               </div>
 
               <div>
+                <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-3">Deletion Mode</p>
+                <div className="rounded-xl bg-white/[0.03] border border-white/[0.06]">
+                  <div className="flex items-start justify-between gap-4 px-4 py-4">
+                    <div className="min-w-0">
+                      <p className="text-sm text-zinc-200 font-medium">Delete items immediately</p>
+                      <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
+                        Permanently deletes selected items instead of moving them to the Trash. Use with caution: deleted items cannot be restored from Trash.
+                      </p>
+                    </div>
+                    <Toggle on={!!settings?.deleteImmediately} onClick={toggleDeleteMode} />
+                  </div>
+                </div>
+              </div>
+
+              <div>
                 <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-3">Quick Scan Folders</p>
                 <div className="rounded-xl bg-white/[0.03] border border-white/[0.06]">
                   <div className="px-4 py-4">
@@ -1016,6 +1092,106 @@ export function SettingsPanel({ onClose, onDevDepsChange, quickScanFolders, onQu
               </div>
             </div>
           </section>
+        )}
+
+        {/* ── Permissions ── */}
+        {activeTab === 'general' && (
+        <section>
+          <h2 className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-3">
+            Permissions
+          </h2>
+          <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] divide-y divide-white/[0.04]">
+
+            {/* Full Disk Access */}
+            <div className="flex items-center justify-between gap-3 px-4 py-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-white/[0.05] flex items-center justify-center shrink-0">
+                  <svg className="w-4 h-4 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                      d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-zinc-300">Full Disk Access</p>
+                  <p className="text-[11px] text-zinc-600 mt-0.5 leading-snug">Required to scan and clean all folders</p>
+                </div>
+              </div>
+              <div className="shrink-0">
+                {fdaGranted === null ? (
+                  <div className="w-3.5 h-3.5 rounded-full border border-transparent border-t-zinc-500 animate-spin" />
+                ) : fdaGranted ? (
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                    Granted
+                  </span>
+                ) : fdaPolling ? (
+                  <span className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                    <div className="w-3 h-3 rounded-full border border-transparent border-t-zinc-400 animate-spin shrink-0" />
+                    Waiting…
+                  </span>
+                ) : (
+                  <button
+                    onClick={handleOpenFdaSettings}
+                    className="text-[11px] font-medium text-orange-400 hover:text-orange-300 transition-colors"
+                  >
+                    Grant Access →
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Notifications */}
+            <div className="flex items-center justify-between gap-3 px-4 py-4">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-8 h-8 rounded-lg bg-white/[0.05] flex items-center justify-center shrink-0">
+                  <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                      d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                  </svg>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-zinc-300">Notifications</p>
+                  <p className="text-[11px] text-zinc-600 mt-0.5 leading-snug">Alerts when background scans find space to reclaim</p>
+                </div>
+              </div>
+              <div className="shrink-0">
+                {notifGranted === null ? (
+                  notifPolling ? (
+                    <span className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                      <div className="w-3 h-3 rounded-full border border-transparent border-t-zinc-400 animate-spin shrink-0" />
+                      Waiting…
+                    </span>
+                  ) : (
+                    <button
+                      onClick={handleOpenNotifSettings}
+                      className="text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+                    >
+                      Enable →
+                    </button>
+                  )
+                ) : notifGranted ? (
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                    Granted
+                  </span>
+                ) : notifPolling ? (
+                  <span className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                    <div className="w-3 h-3 rounded-full border border-transparent border-t-zinc-400 animate-spin shrink-0" />
+                    Waiting…
+                  </span>
+                ) : (
+                  <button
+                    onClick={handleOpenNotifSettings}
+                    className="text-[11px] font-medium text-blue-400 hover:text-blue-300 transition-colors"
+                  >
+                    Enable →
+                  </button>
+                )}
+              </div>
+            </div>
+
+          </div>
+        </section>
         )}
 
         {/* ── Startup ── */}

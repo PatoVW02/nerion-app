@@ -65,6 +65,11 @@ function createWindow(): void {
   }
 }
 
+if (is.dev) {
+  app.setName('Nerion Dev')
+  app.setPath('userData', join(app.getPath('appData'), 'Nerion-Dev'))
+}
+
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.patricio.nerion')
 

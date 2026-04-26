@@ -70,6 +70,9 @@ function layoutItems(
 // Largest block is capped at this fraction of total area so one item never
 // swamps the whole view. The remaining fraction is redistributed proportionally.
 const MAX_DOMINANT_RATIO = 0.75
+const MIN_STRIP_PX = 12
+const MIN_PROTECTED_STRIP_PX = 22
+const MIN_PROTECTED_BLOCK_AREA = 68 * 22
 
 // sizePower < 1 compresses the range between large and small items.
 // At 1.0 sizes are proportional; at ~0.15 all items are nearly equal.
@@ -101,14 +104,18 @@ function squarify(entries: DiskEntry[], rect: Rect, sizePower = 1): LayoutItem[]
   //      so blocks never fall below the render threshold regardless of canvas size.
   //      Derived from: thickness = value/rowLength ≥ MIN_STRIP_PX
   //      ⟹ value ≥ MIN_STRIP_PX × max(W,H) as fraction of total.
-  const MIN_STRIP_PX = 12  // keep comfortably above the 2px render cutoff
   const N = adjusted.length
   if (N > 1) {
     const adjTotal = adjusted.reduce((a, b) => a + b, 0)
     const areaFloor = adjTotal / (N * 6)
     const stripFloor = (MIN_STRIP_PX / Math.max(rect.w, rect.h)) * adjTotal
     const minValue = Math.max(areaFloor, stripFloor)
-    adjusted = adjusted.map(v => Math.max(v, minValue))
+    const protectedStripFloor = (MIN_PROTECTED_STRIP_PX / Math.max(rect.w, rect.h)) * adjTotal
+    const protectedAreaFloor = (MIN_PROTECTED_BLOCK_AREA / Math.max(rect.w * rect.h, 1)) * adjTotal
+    const protectedMinValue = Math.max(minValue, protectedStripFloor, protectedAreaFloor)
+    adjusted = adjusted.map((v, i) =>
+      Math.max(v, isCriticalPath(entries[i].path) ? protectedMinValue : minValue)
+    )
   }
 
   const area = rect.w * rect.h
@@ -182,6 +189,22 @@ function FolderIcon() {
   )
 }
 
+function ProtectedBadge({ compact = false, iconOnly = false }: { compact?: boolean; iconOnly?: boolean }) {
+  return (
+    <span
+      className={[
+        'inline-flex items-center gap-1 rounded-full border border-amber-400/20 bg-amber-500/10 text-amber-300 shrink-0',
+        compact ? 'px-1.5 py-0.5 text-[9px]' : 'px-1.5 py-0.5 text-[10px]'
+      ].join(' ')}
+    >
+      <svg className={compact ? 'w-2.5 h-2.5' : 'w-3 h-3'} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V8a4 4 0 118 0v3m-9 0h10a1 1 0 011 1v7a1 1 0 01-1 1H7a1 1 0 01-1-1v-7a1 1 0 011-1z" />
+      </svg>
+      {!iconOnly && <span>Protected</span>}
+    </span>
+  )
+}
+
 function TreemapBlock({
   entry,
   rect,
@@ -215,6 +238,8 @@ function TreemapBlock({
   const critical     = isCriticalPath(entry.path)
   const selectableContentOnlyRoot = critical && isContentOnlyProtectedRoot(entry.path)
   const showCheckbox = (!critical || selectableContentOnlyRoot) && w >= 52 && h >= 26
+  const showProtectedBadge = critical && w >= 52 && h >= 40
+  const protectedBadgeIconOnly = w < 128
 
   return (
     <div
@@ -233,7 +258,12 @@ function TreemapBlock({
       }}
     >
       {showLabel && (
-        <div className="px-2 pt-1.5 flex flex-col gap-0.5 overflow-hidden">
+        <div
+          className="px-2 pt-1.5 flex flex-col gap-0.5 overflow-hidden"
+          style={{
+            paddingRight: showCheckbox ? 32 : 8,
+          }}
+        >
           <div className="flex items-center gap-1 text-zinc-200 min-w-0">
             {entry.isDir && <FolderIcon />}
             <span className="text-xs font-medium truncate leading-snug">
@@ -245,6 +275,12 @@ function TreemapBlock({
               {formatSize(entry.sizeKB)}
             </span>
           )}
+        </div>
+      )}
+
+      {showProtectedBadge && (
+        <div style={{ position: 'absolute', right: 8, bottom: 8, zIndex: 1 }}>
+          <ProtectedBadge compact iconOnly={protectedBadgeIconOnly} />
         </div>
       )}
 
@@ -331,9 +367,15 @@ function SortIcon({ field, active, dir }: { field: string; active: boolean; dir:
       </svg>
 }
 
-const PANEL_MIN_W = 160
-const PANEL_MAX_W = 360
-const PANEL_DEFAULT_W = 224
+const PANEL_MIN_W = 200
+const PANEL_DEFAULT_W = 360
+const PANEL_MAX_RATIO = 0.75
+const TREEMAP_MIN_W = 260
+
+function getPanelMaxWidth(): number {
+  if (typeof window === 'undefined') return PANEL_DEFAULT_W
+  return Math.max(PANEL_MIN_W, Math.floor(window.innerWidth * PANEL_MAX_RATIO) - TREEMAP_MIN_W)
+}
 
 export function TreemapView({
   entries,
@@ -373,7 +415,7 @@ export function TreemapView({
     function onMouseMove(e: MouseEvent) {
       if (!isDragging.current) return
       const delta = e.clientX - dragStartX.current
-      const next = Math.max(PANEL_MIN_W, Math.min(PANEL_MAX_W, dragStartW.current + delta))
+      const next = Math.max(PANEL_MIN_W, Math.min(getPanelMaxWidth(), dragStartW.current + delta))
       setPanelWidth(next)
     }
     function onMouseUp() {
@@ -388,6 +430,16 @@ export function TreemapView({
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
     }
+  }, [])
+
+  useEffect(() => {
+    function syncPanelWidthToViewport() {
+      setPanelWidth((prev) => Math.max(PANEL_MIN_W, Math.min(getPanelMaxWidth(), prev)))
+    }
+
+    syncPanelWidthToViewport()
+    window.addEventListener('resize', syncPanelWidthToViewport)
+    return () => window.removeEventListener('resize', syncPanelWidthToViewport)
   }, [])
 
   // ── List panel sort state ──────────────────────────────────────────────────
@@ -672,7 +724,10 @@ export function TreemapView({
                     title={entry.name}
                     className="flex-1 min-w-0 truncate text-[11px] text-zinc-300 leading-none"
                   >
-                    {entry.name}
+                    <span className="inline-flex max-w-full items-center gap-1.5">
+                      <span className="truncate">{entry.name}</span>
+                      {isCritical && <ProtectedBadge />}
+                    </span>
                   </span>
 
                   {/* Size */}

@@ -10,10 +10,14 @@ export function OnboardingFlow({ onComplete }: Props) {
   const [history, setHistory] = useState<Step[]>(['notifications'])
   const step = history[history.length - 1]
   const [notifDone, setNotifDone] = useState(false)
+  const [notifGranted, setNotifGranted] = useState<boolean | null>(null)
+  const [notifChecking, setNotifChecking] = useState(false)
   const [fdaSettingsOpened, setFdaSettingsOpened] = useState(false)
   const [fdaContinueReady, setFdaContinueReady] = useState(false)
+  const [fdaActuallyGranted, setFdaActuallyGranted] = useState(false)
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [loginEnabled, setLoginEnabled] = useState(true)
+  const [deleteImmediately, setDeleteImmediately] = useState(false)
 
   function navigate(next: Step) {
     setHistory(h => [...h, next])
@@ -30,13 +34,23 @@ export function OnboardingFlow({ onComplete }: Props) {
   }, [step])
 
   useEffect(() => {
+    window.electronAPI.checkNotificationPermission().then((granted) => {
+      setNotifGranted(granted)
+      setNotifDone(granted === true)
+    }).catch(() => {})
+    window.electronAPI.getSettings().then((settings) => {
+      setDeleteImmediately(settings.deleteImmediately ?? false)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
     if (!fdaSettingsOpened) return
     // 3-second hard fallback
     const fallback = setTimeout(() => setFdaContinueReady(true), 3000)
     // Poll every 1.5 s for actual FDA grant
     const poll = setInterval(async () => {
       const granted = await window.electronAPI.checkFullDiskAccess()
-      if (granted) { clearInterval(poll); clearTimeout(fallback); setFdaContinueReady(true) }
+      if (granted) { clearInterval(poll); clearTimeout(fallback); setFdaActuallyGranted(true); setFdaContinueReady(true) }
     }, 1500)
     return () => { clearInterval(poll); clearTimeout(fallback) }
   }, [fdaSettingsOpened])
@@ -46,14 +60,33 @@ export function OnboardingFlow({ onComplete }: Props) {
     setFdaSettingsOpened(true)
   }
 
+  async function handleRevealElectronApp() {
+    const exePath = await window.electronAPI.getElectronExePath()
+    // exePath is the Electron binary inside the .app bundle; we want the bundle itself
+    const appPath = exePath.includes('.app/Contents/')
+      ? exePath.split('.app/Contents/')[0] + '.app'
+      : exePath
+    window.electronAPI.revealInFinder(appPath)
+  }
+
   function finish() {
     window.electronAPI.markOnboardingComplete()
-    onComplete()
+    if (fdaSettingsOpened && !fdaActuallyGranted) {
+      // FDA was opened but the running process never confirmed it — relaunch so
+      // the TCC grant takes effect (required for scanning/cleaning ~/Library/Logs).
+      window.electronAPI.relaunchApp()
+    } else {
+      onComplete()
+    }
   }
 
   async function handleAllowNotifications() {
+    setNotifChecking(true)
     await window.electronAPI.requestNotificationPermission()
+    const granted = await window.electronAPI.checkNotificationPermission().catch(() => null)
+    setNotifGranted(granted)
     setNotifDone(true)
+    setNotifChecking(false)
   }
 
   function handleEnableAI() {
@@ -93,6 +126,13 @@ export function OnboardingFlow({ onComplete }: Props) {
     await window.electronAPI.setLoginItem(next)
   }
 
+  async function toggleDeleteImmediately() {
+    const next = !deleteImmediately
+    setDeleteImmediately(next)
+    const settings = await window.electronAPI.getSettings()
+    await window.electronAPI.saveSettings({ ...settings, deleteImmediately: next })
+  }
+
   const stepIndex = step === 'notifications' ? 0 : step === 'full-disk-access' ? 1 : step === 'login' ? 3 : 2
 
   return (
@@ -127,21 +167,23 @@ export function OnboardingFlow({ onComplete }: Props) {
             >
               {notifDone ? (
                 <div className="flex flex-col gap-3">
-                  <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.07]">
-                    <svg className="w-3.5 h-3.5 text-zinc-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    <p className="text-xs text-zinc-400 leading-relaxed">
-                      If you didn't see a prompt, enable it in{' '}
-                      <button
-                        onClick={() => window.electronAPI.openExternal('x-apple.systempreferences:com.apple.preference.notifications')}
-                        className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
-                      >
-                        System Settings → Notifications
-                      </button>
-                      .
-                    </p>
-                  </div>
+                  {notifGranted !== true && (
+                    <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.07]">
+                      <svg className="w-3.5 h-3.5 text-zinc-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <p className="text-xs text-zinc-400 leading-relaxed">
+                        If you didn't see a prompt, enable it in{' '}
+                        <button
+                          onClick={() => window.electronAPI.openExternal('x-apple.systempreferences:com.apple.preference.notifications')}
+                          className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
+                        >
+                          System Settings → Notifications
+                        </button>
+                        .
+                      </p>
+                    </div>
+                  )}
                   <button
                     onClick={() => navigate('full-disk-access')}
                     className="w-full py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-sm font-medium text-white transition-colors"
@@ -153,9 +195,10 @@ export function OnboardingFlow({ onComplete }: Props) {
                 <div className="flex flex-col gap-2">
                   <button
                     onClick={handleAllowNotifications}
+                    disabled={notifChecking}
                     className="w-full py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-sm font-medium text-white transition-colors"
                   >
-                    Allow Notifications
+                    {notifChecking ? 'Checking…' : 'Allow Notifications'}
                   </button>
                   <button
                     onClick={() => navigate('full-disk-access')}
@@ -182,12 +225,34 @@ export function OnboardingFlow({ onComplete }: Props) {
               description="Nerion needs Full Disk Access to scan all folders and move files to the trash. Without it, some items like system logs, can't be cleaned and certain features won't work at full capacity."
             >
               <div className="flex flex-col gap-2">
+                {window.electronAPI.isDev && (
+                  <div className="flex flex-col gap-1.5 px-3 py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                    <p className="text-xs text-amber-300 font-medium">Development build</p>
+                    <p className="text-xs text-amber-300/80 leading-relaxed">
+                      macOS identifies this process as <span className="font-mono bg-amber-500/10 px-1 rounded">Electron</span>, not "Nerion Dev". In System Settings, click <strong>+</strong> and add the Electron app from your node_modules.
+                    </p>
+                    <button
+                      onClick={handleRevealElectronApp}
+                      className="self-start text-xs text-amber-400 hover:text-amber-300 underline underline-offset-2 transition-colors"
+                    >
+                      Reveal Electron.app in Finder →
+                    </button>
+                  </div>
+                )}
                 {fdaContinueReady ? (
                   <button
                     onClick={() => navigate('ai-choice')}
                     className="w-full py-2 rounded-lg bg-orange-600 hover:bg-orange-500 text-sm font-medium text-white transition-colors"
                   >
                     Continue
+                  </button>
+                ) : fdaSettingsOpened ? (
+                  <button
+                    disabled
+                    className="w-full py-2 rounded-lg bg-orange-600 opacity-70 cursor-not-allowed text-sm font-medium text-white flex items-center justify-center gap-2"
+                  >
+                    <div className="w-3.5 h-3.5 rounded-full border border-transparent border-t-white animate-spin shrink-0" />
+                    Checking permission…
                   </button>
                 ) : (
                   <button
@@ -313,8 +378,8 @@ export function OnboardingFlow({ onComplete }: Props) {
                     d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
                 </svg>
               }
-              title="Open at startup"
-              description="Nerion can launch silently in the background when your Mac starts so it can scan periodically without you having to open the app."
+              title="Startup and deletion"
+              description="Choose whether Nerion launches in the background at startup, and whether cleanups go to the Trash or are deleted immediately."
             >
               <div className="flex flex-col gap-3">
                 {/* Toggle row */}
@@ -332,6 +397,28 @@ export function OnboardingFlow({ onComplete }: Props) {
                   </span>
                   <div className={['relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0', loginEnabled ? 'bg-emerald-500' : 'bg-zinc-700'].join(' ')}>
                     <span className={['absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200', loginEnabled ? 'translate-x-5' : 'translate-x-0'].join(' ')} />
+                  </div>
+                </button>
+
+                <button
+                  onClick={toggleDeleteImmediately}
+                  className={[
+                    'flex items-center justify-between gap-4 w-full px-4 py-3 rounded-xl border transition-colors',
+                    deleteImmediately
+                      ? 'bg-red-600/10 border-red-500/25'
+                      : 'bg-white/[0.03] border-white/[0.07] hover:bg-white/[0.06]'
+                  ].join(' ')}
+                >
+                  <div className="min-w-0 text-left">
+                    <span className={['block text-sm font-medium', deleteImmediately ? 'text-red-300' : 'text-zinc-300'].join(' ')}>
+                      Delete immediately
+                    </span>
+                    <span className="block text-xs text-zinc-500 mt-0.5">
+                      Skip the Trash and permanently delete cleaned items.
+                    </span>
+                  </div>
+                  <div className={['relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0', deleteImmediately ? 'bg-red-500' : 'bg-zinc-700'].join(' ')}>
+                    <span className={['absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200', deleteImmediately ? 'translate-x-5' : 'translate-x-0'].join(' ')} />
                   </div>
                 </button>
 

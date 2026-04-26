@@ -40,6 +40,8 @@ export interface NerionSettings {
   backgroundScan: BackgroundScanSettings
   showMenuBarIcon: boolean
   autoUpdateEnabled: boolean
+  deleteImmediately: boolean
+  quickScanTrashConfigured: boolean
   preferredOllamaModel: string | null
   onboardingComplete: boolean
   showDevDependencies: boolean
@@ -130,10 +132,14 @@ declare global {
       onUpdaterStatus: (cb: (event: UpdaterStatusEvent) => void) => void
       removeUpdaterListeners: () => void
       requestNotificationPermission: () => Promise<void>
+      checkNotificationPermission: () => Promise<boolean | null>
       markOnboardingComplete: () => Promise<void>
       getLoginItem: () => Promise<boolean>
       setLoginItem: (enable: boolean) => Promise<void>
       checkFullDiskAccess: () => Promise<boolean>
+      relaunchApp: () => Promise<void>
+      isDev: boolean
+      getElectronExePath: () => Promise<string>
       checkOllama: () => Promise<{ installed: boolean; hasModels?: boolean }>
       getOllamaModels: () => Promise<{ ok: boolean; models: OllamaModel[] }>
       pullModel: (name: string) => void

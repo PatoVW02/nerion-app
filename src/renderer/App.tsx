@@ -10,7 +10,7 @@ import { SmartCleanPanel } from './components/SmartCleanPanel'
 import { ReviewPanel } from './components/ReviewPanel'
 import { useNavigation } from './hooks/useNavigation'
 import { useTreeScanner } from './hooks/useTreeScanner'
-import { isCleanable, isDevDependency } from './utils/cleanable'
+import { isAppleMetadata, isCleanable, isDevDependency } from './utils/cleanable'
 import { isCriticalPath, isContentOnlyProtectedRoot } from './utils/criticalPaths'
 import { DiskEntry } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
@@ -47,16 +47,30 @@ type ScanMode = 'quick' | 'deep'
 type ScanPhase = 'welcome' | 'departing' | 'active' | 'arriving'
 
 /** Well-known home directory folders that resolve to ~/name rather than ~/Library/name. */
-const HOME_FOLDER_NAMES = new Set(['Downloads', 'Desktop'])
+const HOME_FOLDER_NAMES = new Set(['Downloads', 'Desktop', 'Trash'])
+
+function resolveQuickFolderPath(folder: string, homeDir: string | null, quickScanPath: string | null): string | null {
+  if (!homeDir || !quickScanPath) return null
+  if (folder.startsWith('/')) return folder
+  if (folder === 'Trash') return `${homeDir}/.Trash`
+  if (HOME_FOLDER_NAMES.has(folder)) return `${homeDir}/${folder}`
+  return `${quickScanPath}/${folder}`
+}
 
 const MIN_PANEL_WIDTH = 220
-const MAX_PANEL_WIDTH = 600
 const DEFAULT_PANEL_WIDTH = 400
+const PANEL_MAX_RATIO = 0.75
+const MAIN_VIEW_MIN_W = 260
 // Split ratio: fraction of panel height given to InfoPanel (top). 0.5 = equal.
 const DEFAULT_SPLIT = 0.5
 const MIN_SPLIT = 0.2
 const MAX_SPLIT = 0.8
 const FREE_DELETE_LIMIT_PER_MONTH = 15
+
+function getPanelMaxWidth(): number {
+  if (typeof window === 'undefined') return DEFAULT_PANEL_WIDTH
+  return Math.max(MIN_PANEL_WIDTH, Math.floor(window.innerWidth * PANEL_MAX_RATIO) - MAIN_VIEW_MIN_W)
+}
 
 export function App() {
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
@@ -78,6 +92,7 @@ function AppShell() {
   const MODAL_SWITCH_DELAY_MS = 200
   const [scanMode, setScanMode] = useState<ScanMode>('quick')
   const [showDevDeps, setShowDevDeps] = useState(false)
+  const [deleteImmediately, setDeleteImmediately] = useState(false)
   const [quickScanFolders, setQuickScanFolders] = useState<string[]>(['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop'])
   const [homeDir, setHomeDir] = useState<string | null>(null)
   const [deleteQuotaUsed, setDeleteQuotaUsed] = useState(0)
@@ -93,6 +108,7 @@ function AppShell() {
       window.electronAPI.getHomeDir(),
     ]).then(([s, home]) => {
       setShowDevDeps(s.showDevDependencies ?? false)
+      setDeleteImmediately(s.deleteImmediately ?? false)
       setQuickScanFolders(s.quickScanFolders ?? ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop'])
       setDeleteQuotaUsed(s.deleteQuota?.used ?? 0)
       setHomeDir(home)
@@ -149,24 +165,25 @@ function AppShell() {
   // In quick mode, the allowed folder paths act as a filter for both the block
   // view and Smart Clean. Deep mode = no filter (null).
   const quickScanAllowedPaths = useMemo(() => {
-    if (scanMode !== 'quick' || !QUICK_SCAN_PATH || quickScanFolders.length === 0) return null
-    return new Set(quickScanFolders.map(f => {
-      if (f.startsWith('/')) return f
-      if (HOME_FOLDER_NAMES.has(f) && homeDir) return `${homeDir}/${f}`
-      return `${QUICK_SCAN_PATH}/${f}`
-    }))
+    if (scanMode !== 'quick' || !QUICK_SCAN_PATH) return null
+    const paths = quickScanFolders
+      .map((folder) => resolveQuickFolderPath(folder, homeDir, QUICK_SCAN_PATH))
+      .filter((value): value is string => value !== null)
+    return new Set(paths)
   }, [scanMode, quickScanFolders, QUICK_SCAN_PATH, homeDir])
 
   // Paths to actually scan in Quick mode: ~/Library (when predefined Library folders are enabled)
   // plus any absolute custom paths that live outside of ~/Library.
   const quickScanPaths = useMemo(() => {
-    if (scanMode !== 'quick' || !QUICK_SCAN_PATH || quickScanFolders.length === 0) return null
+    if (scanMode !== 'quick' || !QUICK_SCAN_PATH) return null
     const paths: string[] = []
     // Library-relative folders → scan ~/Library once
     if (quickScanFolders.some(f => !f.startsWith('/') && !HOME_FOLDER_NAMES.has(f))) paths.push(QUICK_SCAN_PATH)
     // Home-relative well-known folders (e.g. Downloads) → scan each directly
     for (const f of quickScanFolders) {
-      if (!f.startsWith('/') && HOME_FOLDER_NAMES.has(f) && homeDir) paths.push(`${homeDir}/${f}`)
+      const resolved = resolveQuickFolderPath(f, homeDir, QUICK_SCAN_PATH)
+      if (!resolved || f.startsWith('/') || !HOME_FOLDER_NAMES.has(f)) continue
+      paths.push(resolved)
     }
     // Absolute custom paths outside ~/Library
     for (const f of quickScanFolders) {
@@ -175,7 +192,19 @@ function AppShell() {
     return paths.length > 0 ? paths : null
   }, [scanMode, quickScanFolders, QUICK_SCAN_PATH, homeDir])
 
-  const { tree, scanning, scannedCount, removeEntries, cancelScan } = useTreeScanner(rootPath, scanTrigger, quickScanPaths)
+  const deepScanPaths = useMemo(() => {
+    if (scanMode !== 'deep' || !rootPath || !homeDir) return null
+    const trashPath = `${homeDir}/.Trash`
+    const normalizedRoot = rootPath.replace(/\/+$/, '')
+    if (trashPath === normalizedRoot || trashPath.startsWith(normalizedRoot + '/')) return null
+    return [rootPath, trashPath]
+  }, [scanMode, rootPath, homeDir])
+
+  const { tree, scanning, scannedCount, removeEntries, cancelScan } = useTreeScanner(
+    rootPath,
+    scanTrigger,
+    scanMode === 'quick' ? quickScanPaths : deepScanPaths
+  )
 
   // Reverse transition: mount welcome in an "arriving" state, then animate to resting state.
   useEffect(() => {
@@ -196,7 +225,8 @@ function AppShell() {
     const homeEntries: DiskEntry[] = quickScanFolders
       .filter(f => !f.startsWith('/') && HOME_FOLDER_NAMES.has(f) && homeDir)
       .map(f => {
-        const resolvedPath = `${homeDir}/${f}`
+        const resolvedPath = resolveQuickFolderPath(f, homeDir, QUICK_SCAN_PATH)
+        if (!resolvedPath) return null
         if (!quickScanAllowedPaths.has(resolvedPath)) return null
         const children = tree.get(resolvedPath) ?? []
         const totalKB = children.reduce((s, e) => s + e.sizeKB, 0)
@@ -236,8 +266,15 @@ function AppShell() {
       }
     }
 
+    // Direct children of the user's Trash should always be considered cleanable,
+    // but never the Trash folder itself.
+    const trashParents = new Set<string>()
+    if (homeDir) trashParents.add(`${homeDir}/.Trash`)
+
     for (const entries of tree.values()) {
       for (const entry of entries) {
+        if (isAppleMetadata(entry)) continue
+        if (isCriticalPath(entry.path) && !isContentOnlyProtectedRoot(entry.path)) continue
         const isDev = isDevDependency(entry)
 
         // Direct children of a targeted Downloads folder are always cleanable
@@ -245,8 +282,9 @@ function AppShell() {
         const isDownloadsItem = downloadsParents.size > 0
           && downloadsParents.has(parentDir)
           && entry.sizeKB > 0
+        const isTrashItem = trashParents.has(parentDir) && entry.sizeKB > 0
 
-        if (allowedPrefixes && !isDev && !isDownloadsItem) {
+        if (allowedPrefixes && !isDev && !isDownloadsItem && !isTrashItem) {
           // For regular cache/temp entries: restrict to the quick-scan allowed paths
           // (e.g. ~/Library/Caches, ~/Library/Logs, custom absolute paths).
           // Dev dependencies are intentionally exempt from this filter — they have their
@@ -256,12 +294,15 @@ function AppShell() {
           const ok = allowedPrefixes.some(p => entry.path === p || entry.path.startsWith(p + '/'))
           if (!ok) continue
         }
-        if (isCleanable(entry) || isDev || isDownloadsItem)
+        const isProtectedRootContentsOnly = isContentOnlyProtectedRoot(entry.path)
+        if (isProtectedRootContentsOnly) continue
+
+        if (isCleanable(entry) || isDev || isDownloadsItem || isTrashItem)
           result.set(entry.path, entry)
       }
     }
     return result
-  }, [tree, quickScanAllowedPaths, rootPath])
+  }, [tree, quickScanAllowedPaths, rootPath, homeDir])
 
   const cleanableCount = allCleanable.size
 
@@ -296,7 +337,7 @@ function AppShell() {
     const onMove = (e: MouseEvent) => {
       if (draggingWidth.current) {
         const delta = dragStartX.current - e.clientX
-        const next = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, dragStartWidth.current + delta))
+        const next = Math.min(getPanelMaxWidth(), Math.max(MIN_PANEL_WIDTH, dragStartWidth.current + delta))
         setPanelWidth(next)
       }
       if (draggingSplit.current && rightPanelRef.current) {
@@ -315,6 +356,16 @@ function AppShell() {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
+  }, [])
+
+  useEffect(() => {
+    const syncPanelWidthToViewport = () => {
+      setPanelWidth((prev) => Math.max(MIN_PANEL_WIDTH, Math.min(getPanelMaxWidth(), prev)))
+    }
+
+    syncPanelWidthToViewport()
+    window.addEventListener('resize', syncPanelWidthToViewport)
+    return () => window.removeEventListener('resize', syncPanelWidthToViewport)
   }, [])
 
   // ── Scan ──────────────────────────────────────────────────────────────────
@@ -462,6 +513,8 @@ function AppShell() {
   const handleConfirmTrash = useCallback(async (paths: string[], totalKB: number) => {
     if (paths.length === 0) return null
 
+    const deletedPathSet = new Set(paths)
+
     // Stream progress: update tree + selection as each file is confirmed deleted.
     let deletedCount = 0
     const unsubscribe = window.electronAPI.onTrashProgress(({ path: p, success }) => {
@@ -470,6 +523,12 @@ function AppShell() {
         removeEntries([p])
         setSelectedPaths(prev => { const next = new Map(prev); next.delete(p); return next })
         setConfirmedDeletedPaths(prev => new Set([...prev, p]))
+        setSavedLeftoverSelection(prev => {
+          if (prev === null || !prev.has(p)) return prev
+          const next = new Set(prev)
+          next.delete(p)
+          return next
+        })
       }
     })
 
@@ -479,7 +538,18 @@ function AppShell() {
     // Notify only if at least some files were actually deleted.
     // confirmedDeletedPaths is intentionally NOT reset here — it persists until the next scan
     // so that stale tree entries (from batched IPC flushes or timing races) remain hidden.
-    if (deletedCount > 0) window.electronAPI.notifyCleaned(totalKB)
+    if (deletedCount > 0) {
+      setSavedLeftoverSelection(prev => {
+        if (prev === null) return prev
+        const next = new Set(prev)
+        let changed = false
+        for (const p of deletedPathSet) {
+          if (next.delete(p)) changed = true
+        }
+        return changed ? next : prev
+      })
+      window.electronAPI.notifyCleaned(totalKB)
+    }
 
     return err
   }, [removeEntries])
@@ -684,6 +754,7 @@ function AppShell() {
                     fullTree={tree}
                     rootPath={smartCleanRootPath}
                     homeDir={homeDir}
+                    autoSelectDevDependencies={showDevDeps}
                     onInfo={setInfoPanelEntry}
                     onRevealInFinder={(p) => window.electronAPI.revealInFinder(p)}
                     onReview={handleSmartCleanReview}
@@ -717,6 +788,7 @@ function AppShell() {
           isPremium={isPremium}
           remainingQuota={FREE_DELETE_LIMIT_PER_MONTH - deleteQuotaUsed}
           onConfirm={handleConfirmTrash}
+          deleteImmediately={deleteImmediately}
           confirmedDeletedPaths={confirmedDeletedPaths}
           onCancel={() => setReviewOpen(false)}
           onDone={() => {
@@ -770,6 +842,7 @@ function AppShell() {
         <SettingsPanel
           onClose={() => setSettingsOpen(false)}
           onDevDepsChange={setShowDevDeps}
+          onDeleteModeChange={setDeleteImmediately}
           quickScanFolders={quickScanFolders}
           onQuickScanFoldersChange={setQuickScanFolders}
           isPremium={isPremium}

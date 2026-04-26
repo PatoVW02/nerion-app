@@ -44,7 +44,7 @@ function AnimatedCheckmark() {
 
 // ─── Done view ────────────────────────────────────────────────────────────────
 
-function DoneView({ freedKB, onDone }: { freedKB: number; onDone: () => void }) {
+function DoneView({ freedKB, onDone, deleteImmediately }: { freedKB: number; onDone: () => void; deleteImmediately: boolean }) {
   const [visible, setVisible] = useState(false)
   useEffect(() => { const t = setTimeout(() => setVisible(true), 120); return () => clearTimeout(t) }, [])
 
@@ -58,7 +58,9 @@ function DoneView({ freedKB, onDone }: { freedKB: number; onDone: () => void }) 
         <p className="text-2xl font-semibold text-zinc-100 tabular-nums">
           {formatSize(freedKB)} freed
         </p>
-        <p className="text-sm text-zinc-500 mt-1.5">Items have been moved to the Trash</p>
+        <p className="text-sm text-zinc-500 mt-1.5">
+          {deleteImmediately ? 'Items have been deleted permanently' : 'Items have been moved to the Trash'}
+        </p>
       </div>
       <button
         onClick={onDone}
@@ -316,6 +318,7 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
 interface ReviewPanelProps {
   entries: DiskEntry[]
   isPremium: boolean
+  deleteImmediately: boolean
   remainingQuota: number
   /** Paths confirmed actually deleted so far — used to update the tree live during deletion. */
   confirmedDeletedPaths: Set<string>
@@ -325,7 +328,7 @@ interface ReviewPanelProps {
   onUpgradeClick: () => void
 }
 
-export function ReviewPanel({ entries, isPremium, remainingQuota, confirmedDeletedPaths, onConfirm, onCancel, onDone, onUpgradeClick }: ReviewPanelProps) {
+export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQuota, confirmedDeletedPaths, onConfirm, onCancel, onDone, onUpgradeClick }: ReviewPanelProps) {
   const selectableInReview = entries.filter(
     (e) => !isCriticalPath(e.path) || isContentOnlyProtectedRoot(e.path),
   )
@@ -445,7 +448,7 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, confirmedDelet
           <HeaderFrame>
             <span className="opacity-0 select-none">Review</span>
           </HeaderFrame>
-          <DoneView freedKB={freedKB} onDone={onDone} />
+          <DoneView freedKB={freedKB} onDone={onDone} deleteImmediately={deleteImmediately} />
         </>
       ) : (
         <>
@@ -473,7 +476,7 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, confirmedDelet
             <span className="text-xs text-red-400">
               {selectedEntries.length === 0
                 ? 'Nothing selected'
-                : `${selectedEntries.length} ${selectedEntries.length === 1 ? 'item' : 'items'} will be moved to Trash`}
+                : `${selectedEntries.length} ${selectedEntries.length === 1 ? 'item' : 'items'} will be ${deleteImmediately ? 'deleted permanently' : 'moved to Trash'}`}
             </span>
             {selectedEntries.length > 0 && (
               <span className="text-xs font-medium text-red-300 tabular-nums">
@@ -589,12 +592,12 @@ export function ReviewPanel({ entries, isPremium, remainingQuota, confirmedDelet
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                       </svg>
                       {remaining > 0
-                        ? `Moving to Trash… ${confirmedDeletedPaths.size} of ${selectedEntries.length}`
+                        ? `${deleteImmediately ? 'Deleting…' : 'Moving to Trash…'} ${confirmedDeletedPaths.size} of ${selectedEntries.length}`
                         : 'Finishing up…'}
                     </>
                   )
                 })() : (
-                  `Move ${selectedEntries.length} ${selectedEntries.length === 1 ? 'item' : 'items'} to Trash · ${formatSize(totalSelectedKB)}`
+                  `${deleteImmediately ? 'Delete' : 'Move'} ${selectedEntries.length} ${selectedEntries.length === 1 ? 'item' : 'items'} ${deleteImmediately ? 'permanently' : 'to Trash'} · ${formatSize(totalSelectedKB)}`
                 )}
               </button>
             </div>

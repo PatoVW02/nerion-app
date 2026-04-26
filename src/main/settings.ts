@@ -15,6 +15,8 @@ export interface NerionSettings {
   backgroundScan: BackgroundScanSettings
   showMenuBarIcon: boolean
   autoUpdateEnabled: boolean
+  deleteImmediately: boolean
+  quickScanTrashConfigured: boolean
   preferredOllamaModel: string | null
   onboardingComplete: boolean
   showDevDependencies: boolean
@@ -51,11 +53,13 @@ const DEFAULTS: NerionSettings = {
   },
   showMenuBarIcon: true,
   autoUpdateEnabled: true,
+  deleteImmediately: false,
+  quickScanTrashConfigured: false,
   preferredOllamaModel: null,
   onboardingComplete: false,
   showDevDependencies: false,
   aiMode: 'cloud',
-  quickScanFolders: ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop'],
+  quickScanFolders: ['Caches', 'Logs', 'Developer', 'Containers', 'Downloads', 'Desktop', 'Trash'],
   customQuickScanFolders: [],
   lastManualScanTime: null,
   lastManualScanFoundKB: 0,
@@ -87,13 +91,22 @@ export function loadSettings(): NerionSettings {
       deleteQuota: { ...DEFAULTS.deleteQuota, ...parsed.deleteQuota },
     }
 
+    let mutated = false
+    if (!merged.quickScanTrashConfigured) {
+      if (!merged.quickScanFolders.includes('Trash')) {
+        merged.quickScanFolders = [...merged.quickScanFolders, 'Trash']
+      }
+      merged.quickScanTrashConfigured = true
+      mutated = true
+    }
+
     // Auto-reset quota when the month changes.
     const monthKey = currentMonthKey()
     const shouldNormalize = !hasValidDeleteQuota
     if (merged.deleteQuota.monthKey !== monthKey) {
       merged.deleteQuota = { monthKey, used: 0 }
       saveSettings(merged)
-    } else if (shouldNormalize) {
+    } else if (shouldNormalize || mutated) {
       // Backfill missing schema keys on disk so subsequent reads/writes are stable.
       saveSettings(merged)
     }

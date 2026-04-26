@@ -10,6 +10,11 @@ export interface TreeNode {
   totalKB: number
 }
 
+function displaySegment(segment: string): string {
+  if (segment === '.Trash') return 'Trash'
+  return segment
+}
+
 // Build a compressed trie of cleanable directories from a flat list of DiskEntries.
 // Non-cleanable single-child intermediate nodes are collapsed into a combined label.
 // selectablePaths: additional paths that should be treated as selectable (e.g. children of cleanable dirs).
@@ -91,7 +96,7 @@ export function buildCleanableTree(
       : children.reduce((s, c) => s + c.totalKB, 0)
 
     return {
-      label,
+      label: displaySegment(label),
       path: node.path,
       isCleanable: entryIsCleanable,
       entry: node.entry,
@@ -115,7 +120,7 @@ export function buildCleanableTree(
       const child = node.children[0]
       return {
         ...child,
-        label: node.label ? node.label + '/' + child.label : child.label
+        label: node.label ? `${node.label}/${child.label}` : child.label
       }
     }
     return node

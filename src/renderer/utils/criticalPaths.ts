@@ -20,9 +20,118 @@ function getHome(): string {
   return '/Users/__unknown__'
 }
 
+function userLibraryExactProtectedRoots(home: string): string[] {
+  return [
+    `${home}/Library/Application Scripts`,
+    `${home}/Library/Application Support`,
+    `${home}/Library/Assistants`,
+    `${home}/Library/Audio`,
+    `${home}/Library/Autosave Information`,
+    `${home}/Library/ColorPickers`,
+    `${home}/Library/ColorSync`,
+    `${home}/Library/Components`,
+    `${home}/Library/Containers`,
+    `${home}/Library/Contextual Menu Items`,
+    `${home}/Library/Cookies`,
+    `${home}/Library/Developer`,
+    `${home}/Library/Dictionaries`,
+    `${home}/Library/Documentation`,
+    `${home}/Library/Extensions`,
+    `${home}/Library/Favorites`,
+    `${home}/Library/Fonts`,
+    `${home}/Library/Group Containers`,
+    `${home}/Library/Internet Plug-ins`,
+    `${home}/Library/Keyboards`,
+    `${home}/Library/Keychains`,
+    `${home}/Library/LaunchAgents`,
+    `${home}/Library/LaunchDaemons`,
+    `${home}/Library/Mail`,
+    `${home}/Library/Messages`,
+    `${home}/Library/Mobile Documents`,
+    `${home}/Library/PreferencePanes`,
+    `${home}/Library/Preferences`,
+    `${home}/Library/Printers`,
+    `${home}/Library/QuickLook`,
+    `${home}/Library/QuickTime`,
+    `${home}/Library/Safari`,
+    `${home}/Library/Scripting Additions`,
+    `${home}/Library/Sounds`,
+    `${home}/Library/CloudStorage`,
+  ]
+}
+
+function userLibraryProtectedPrefixes(home: string): string[] {
+  return [
+    `${home}/Library/Containers/`,
+    `${home}/Library/CloudStorage/`,
+    `${home}/Library/Fonts/`,
+    `${home}/Library/Group Containers/`,
+    `${home}/Library/Keychains/`,
+    `${home}/Library/Mail/`,
+    `${home}/Library/Messages/`,
+    `${home}/Library/Mobile Documents/`,
+    `${home}/Library/Safari/`,
+  ]
+}
+
+const APPLE_BUILTIN_APPS = new Set([
+  'App Store.app',
+  'Books.app',
+  'Calendar.app',
+  'Contacts.app',
+  'FaceTime.app',
+  'Mail.app',
+  'Messages.app',
+  'Music.app',
+  'Notes.app',
+  'Photos.app',
+  'Podcasts.app',
+  'Preview.app',
+  'QuickTime Player.app',
+  'Reminders.app',
+  'Safari.app',
+  'System Settings.app',
+  'System Preferences.app',
+  'TV.app',
+])
+
+const APPLE_BUILTIN_UTILITIES = new Set([
+  'Activity Monitor.app',
+  'Console.app',
+  'Disk Utility.app',
+  'Migration Assistant.app',
+  'Terminal.app',
+])
+
+function isProtectedAppleSystemApp(normalized: string): boolean {
+  if (normalized.startsWith('/System/Applications/')) return true
+  if (normalized.startsWith('/System/Library/CoreServices/')) return true
+
+  const appName = normalized.split('/').pop()
+  if (!appName) return false
+
+  if (normalized.startsWith('/Applications/') && APPLE_BUILTIN_APPS.has(appName)) return true
+  if (normalized.startsWith('/Applications/Utilities/') && APPLE_BUILTIN_UTILITIES.has(appName)) return true
+  return false
+}
+
 export function isCriticalPath(itemPath: string): boolean {
   const home = getHome()
   const normalized = itemPath.replace(/\/+$/, '')
+  const contentOnlyRoots = [
+    `${home}/Desktop`,
+    `${home}/Documents`,
+    `${home}/Downloads`,
+    `${home}/Movies`,
+    `${home}/Music`,
+    `${home}/Pictures`,
+    `${home}/.Trash`,
+    `${home}/Library/Caches`,
+    `${home}/Library/Logs`,
+    `${home}/Library/HTTPStorages`,
+    `${home}/Library/Saved Application State`,
+    `${home}/Library/WebKit`,
+  ]
 
   const BLOCKED_EXACT = new Set([
     '/',
@@ -32,6 +141,7 @@ export function isCriticalPath(itemPath: string): boolean {
     '/Library',
     '/Applications',
     '/bin',
+    '/lib',
     '/sbin',
     '/usr',
     '/usr/bin',
@@ -48,32 +158,30 @@ export function isCriticalPath(itemPath: string): boolean {
     '/cores',
     home,
     `${home}/Library`,
-    `${home}/Library/Preferences`,
-    `${home}/Library/Application Support`,
-    `${home}/Library/Keychains`,
-    `${home}/Library/Mail`,
-    `${home}/Library/Messages`,
-    `${home}/Documents`,
-    `${home}/Desktop`,
-    `${home}/Downloads`,
-    `${home}/Movies`,
-    `${home}/Music`,
-    `${home}/Pictures`,
     `${home}/Applications`,
+    ...userLibraryExactProtectedRoots(home),
+    ...contentOnlyRoots,
   ])
 
   if (BLOCKED_EXACT.has(normalized)) return true
+  if (isProtectedAppleSystemApp(normalized)) return true
 
   // Anything inside core system trees
   const BLOCKED_PREFIXES = [
     '/System/',
+    '/Library/',
+    '/usr/',
+    '/var/',
+    '/private/',
     '/usr/lib/',
     '/usr/bin/',
     '/sbin/',
     '/bin/',
+    '/lib/',
     '/private/etc/',
     '/private/var/db/',
     '/private/var/root/',
+    ...userLibraryProtectedPrefixes(home),
   ]
 
   for (const prefix of BLOCKED_PREFIXES) {
@@ -87,6 +195,13 @@ export function isCriticalPath(itemPath: string): boolean {
   if (/^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures|Applications)$/.test(normalized)) {
     return true
   }
+  if (/^\/Users\/[^/]+\/\.Trash$/.test(normalized)) return true
+  if (/^\/Users\/[^/]+\/Library\/(Caches|Logs|HTTPStorages|Saved Application State|WebKit)$/.test(normalized)) {
+    return true
+  }
+  if (/^\/Users\/[^/]+\/Library\/(Application Scripts|Application Support|Containers|Fonts|Group Containers|Keychains|Mail|Messages|Mobile Documents|Preferences|Safari|CloudStorage)$/.test(normalized)) {
+    return true
+  }
 
   return false
 }
@@ -94,5 +209,6 @@ export function isCriticalPath(itemPath: string): boolean {
 // Protected user roots where cleanup should target contents only (never the root folder).
 export function isContentOnlyProtectedRoot(itemPath: string): boolean {
   const normalized = itemPath.replace(/\/+$/, '')
-  return /^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures)$/.test(normalized)
+  return /^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures|\.Trash)$/.test(normalized)
+    || /^\/Users\/[^/]+\/Library\/(Caches|Logs|HTTPStorages|Saved Application State|WebKit)$/.test(normalized)
 }

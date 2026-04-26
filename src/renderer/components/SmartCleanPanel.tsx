@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, memo, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { DiskEntry, AppLeftover } from '../types'
-import { isCleanable, isDevDependency } from '../utils/cleanable'
+import { isAppleMetadata, isCleanable, isDevDependency } from '../utils/cleanable'
 import { formatSize } from '../utils/format'
 import { buildCleanableTree, TreeNode } from '../utils/buildTree'
 import { isCriticalPath, isContentOnlyProtectedRoot } from '../utils/criticalPaths'
@@ -11,6 +11,7 @@ interface SmartCleanPanelProps {
   fullTree: Map<string, DiskEntry[]>
   rootPath: string
   homeDir: string | null
+  autoSelectDevDependencies: boolean
   onInfo: (entry: DiskEntry) => void
   onRevealInFinder: (path: string) => void
   /**
@@ -48,6 +49,17 @@ function FileIcon({ className = 'w-3.5 h-3.5 text-zinc-400 shrink-0' }: { classN
     <svg className={className} fill="currentColor" viewBox="0 0 20 20">
       <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clipRule="evenodd" />
     </svg>
+  )
+}
+
+function ProtectedBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300 shrink-0">
+      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V8a4 4 0 118 0v3m-9 0h10a1 1 0 011 1v7a1 1 0 01-1 1H7a1 1 0 01-1-1v-7a1 1 0 011-1z" />
+      </svg>
+      <span>Protected</span>
+    </span>
   )
 }
 
@@ -202,6 +214,7 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
 
   const hasChildren = node.children.length > 0
   const isDir = node.entry ? node.entry.isDir : true  // intermediate nodes are always dirs
+  const critical = isCriticalPath(node.path)
 
   // directlyChecked: this node is explicitly in selectedPaths
   // checked: also true when an ancestor is selected (parent covers this node for deletion)
@@ -360,11 +373,14 @@ const TreeItem = memo(function TreeItem({ node, depth, selectedPaths, onToggle, 
           }}
           className="flex-1 min-w-0 flex items-center justify-between gap-1 text-left min-w-0"
         >
-          <span className={[
-            'text-xs truncate leading-snug',
-            node.isCleanable ? 'text-zinc-200 font-medium' : 'text-zinc-500'
-          ].join(' ')}>
-            {node.label}
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className={[
+              'text-xs truncate leading-snug',
+              node.isCleanable ? 'text-zinc-200 font-medium' : 'text-zinc-500'
+            ].join(' ')}>
+              {node.label}
+            </span>
+            {critical && <ProtectedBadge />}
           </span>
           <span className="text-[10px] text-zinc-600 tabular-nums shrink-0">
             {formatSize(node.totalKB)}
@@ -425,6 +441,7 @@ interface LeftoverRowProps {
 function LeftoverRow({ item, checked, onToggle, onReveal, onInfo, disabled }: LeftoverRowProps) {
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null)
   const isDir = !item.name.endsWith('.plist')
+  const critical = isCriticalPath(item.path)
 
   // Construct a DiskEntry so the InfoPanel can display AI analysis for leftovers
   const asDiskEntry: DiskEntry = {
@@ -460,7 +477,10 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo, disabled }: Le
 
         <button onClick={disabled ? undefined : onToggle} className="flex-1 min-w-0 text-left">
           <div className="flex items-center justify-between gap-1">
-            <span className="text-xs font-medium text-zinc-200 truncate">{item.name}</span>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="text-xs font-medium text-zinc-200 truncate">{item.name}</span>
+              {critical && <ProtectedBadge />}
+            </span>
             <span className="text-[10px] text-zinc-600 tabular-nums shrink-0">{formatSize(item.sizeKB)}</span>
           </div>
           <span className="text-[10px] text-zinc-600 font-mono truncate block mt-0.5">{item.location}</span>
@@ -490,6 +510,7 @@ export function SmartCleanPanel({
   fullTree,
   rootPath,
   homeDir,
+  autoSelectDevDependencies,
   onInfo,
   onRevealInFinder,
   onReview,
@@ -544,13 +565,14 @@ export function SmartCleanPanel({
     setLeftoversLoading(true)
     window.electronAPI.findAppLeftovers()
       .then((items) => {
-        setLeftovers(items)
+        const filteredItems = items.filter((item) => !confirmedDeletedPaths.has(item.path))
+        setLeftovers(filteredItems)
         if (initialLeftoverSelection === null) {
           // First open this session — start with nothing selected (user opts in)
           setSelectedLeftovers(new Set())
         } else {
           // Restore previous selection, keeping only paths that still exist
-          const existing = new Set(items.map((i) => i.path))
+          const existing = new Set(filteredItems.map((i) => i.path))
           setSelectedLeftovers(new Set([...initialLeftoverSelection].filter((p) => existing.has(p))))
         }
       })
@@ -564,19 +586,30 @@ export function SmartCleanPanel({
   // system and dev content — which would cause everything to collapse into one section.
   const systemEntries = useMemo(
     () => [...allCleanable.values()].filter(
-      e => e.sizeKB > 0 && !isDevDependency(e) && !confirmedDeletedPaths.has(e.path)
+      (e) => {
+        if (e.sizeKB <= 0 || isDevDependency(e) || confirmedDeletedPaths.has(e.path)) return false
+        if (!e.isDir) return true
+        const children = fullTree.get(e.path) ?? []
+        return children.length > 0
+      }
     ),
-    [allCleanable, confirmedDeletedPaths]
+    [allCleanable, confirmedDeletedPaths, fullTree]
   )
   const devEntries = useMemo(
     () => [...allCleanable.values()].filter(
-      e => e.sizeKB > 0 && isDevDependency(e) && !confirmedDeletedPaths.has(e.path)
+      (e) => {
+        if (e.sizeKB <= 0 || !isDevDependency(e) || confirmedDeletedPaths.has(e.path)) return false
+        if (!e.isDir) return true
+        const children = fullTree.get(e.path) ?? []
+        return children.length > 0
+      }
     ),
-    [allCleanable, confirmedDeletedPaths]
+    [allCleanable, confirmedDeletedPaths, fullTree]
   )
 
-  // Auto-select all scan items (caches + dev deps) on first open, except Downloads
-  // items which are handled separately by the age-based effect below.
+  // Auto-select system scan items on first open, and dev dependencies only when
+  // the corresponding setting is enabled. Downloads items are handled separately
+  // by the age-based effect below.
   const scanAutoSelectedRef = useRef(false)
   useEffect(() => {
     if (scanAutoSelectedRef.current) return
@@ -593,10 +626,12 @@ export function SmartCleanPanel({
       }
       initial.add(e.path)
     }
-    for (const e of devEntries) initial.add(e.path)
+    if (autoSelectDevDependencies) {
+      for (const e of devEntries) initial.add(e.path)
+    }
     setSelectedScanPaths(initial)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [systemEntries, devEntries, homeDir])
+  }, [systemEntries, devEntries, homeDir, autoSelectDevDependencies])
 
   // Auto-select Downloads items older than 7 days (by last-modified date).
   // Runs once after scan data is ready (guarded by ref).
@@ -635,10 +670,23 @@ export function SmartCleanPanel({
   const { systemChildEntries, systemChildPaths } = useMemo(() => {
     const extra: DiskEntry[] = []
     const extraPaths = new Set<string>()
+    const expandableRoots = new Set<string>()
     for (const entry of systemEntries) {
-      if (!entry.isDir) continue
-      for (const child of fullTree.get(entry.path) ?? []) {
-        if (!allCleanable.has(child.path) && child.sizeKB > 0 && !confirmedDeletedPaths.has(child.path) && child.name !== '.DS_Store') {
+      if (entry.isDir) expandableRoots.add(entry.path)
+    }
+    for (const dirPath of fullTree.keys()) {
+      if (isContentOnlyProtectedRoot(dirPath)) expandableRoots.add(dirPath)
+    }
+
+    for (const dirPath of expandableRoots) {
+      for (const child of fullTree.get(dirPath) ?? []) {
+        if (
+          !allCleanable.has(child.path) &&
+          child.sizeKB > 0 &&
+          !confirmedDeletedPaths.has(child.path) &&
+          !isCriticalPath(child.path) &&
+          !isAppleMetadata(child)
+        ) {
           extra.push(child)
           extraPaths.add(child.path)
         }

@@ -4,6 +4,7 @@ import { DiskEntry } from '../types'
 const CLEANABLE_NAMES = new Set([
   // Generic caches
   '.cache',
+  '.trash',
   // Temp directories
   '.tmp',
   'tmp',
@@ -77,7 +78,30 @@ const MANAGED_PATH_SUBSTRINGS = [
   '/Library/Containers/', // macOS app sandbox containers — never delete app internals
 ]
 
+// Apple/macOS housekeeping files that shouldn't surface in Smart Clean.
+const APPLE_METADATA_NAMES = new Set([
+  '.ds_store',
+  '.spotlight-v100',
+  '.fseventsd',
+  '.temporaryitems',
+  '.trashes',
+  '.documentrevisions-v100',
+  '.volumesicon.icns',
+  '.apdisk',
+])
+
+export function isAppleMetadata(entry: DiskEntry): boolean {
+  const lowerName = entry.name.toLowerCase()
+  if (APPLE_METADATA_NAMES.has(lowerName)) return true
+
+  // AppleDouble sidecar files created by Finder on some filesystems.
+  if (!entry.isDir && entry.name.startsWith('._')) return true
+
+  return false
+}
+
 export function isCleanable(entry: DiskEntry): boolean {
+  if (isAppleMetadata(entry)) return false
   if (!entry.isDir) return false
   if (!CLEANABLE_NAMES.has(entry.name.toLowerCase())) return false
   // Never flag dirs inside system or tool locations (same guard as isDevDependency).

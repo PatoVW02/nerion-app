@@ -1,7 +1,7 @@
 import { ipcMain, dialog, shell, net, Notification, app } from 'electron'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { stat, readdir } from 'node:fs/promises'
+import { stat, readdir, realpath, rm } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { scanDirectoryStreaming } from './scanner'
@@ -19,10 +19,199 @@ let ollamaAbort: AbortController | null = null
 let ollamaUserCancelled = false
 const FREE_DELETE_LIMIT_PER_MONTH = 15
 
+async function checkNotificationPermissionStatus(): Promise<boolean | null> {
+  // Read the user-level TCC database — no FDA required, it lives in ~/Library.
+  // Returns true (granted), false (denied), or null (no entry yet).
+  try {
+    const userTCC = path.join(os.homedir(), 'Library', 'Application Support', 'com.apple.TCC', 'TCC.db')
+    const clientIds = Array.from(new Set([
+      app.getBundleID(),
+      'com.patricio.nerion',
+      'com.github.Electron',
+      'com.github.electron',
+    ].filter((value): value is string => !!value)))
+
+    const quotedClients = clientIds.map((clientId) => `'${clientId.replace(/'/g, "''")}'`).join(', ')
+    const query = [
+      'SELECT',
+      "  CASE",
+      "    WHEN auth_value IS NOT NULL THEN auth_value",
+      "    WHEN allowed IS NOT NULL THEN CASE WHEN allowed = 1 THEN 2 ELSE 0 END",
+      '    ELSE NULL',
+      '  END AS permission',
+      'FROM access',
+      "WHERE service='kTCCServiceUserNotification'",
+      `  AND client IN (${quotedClients})`,
+      'ORDER BY permission DESC',
+      'LIMIT 1;',
+    ].join(' ')
+
+    const { stdout } = await execFileAsync('/usr/bin/sqlite3', [userTCC, query])
+    const value = stdout.trim()
+    if (value === '2' || value === '3') return true
+    if (value === '0' || value === '1') return false
+    return null
+  } catch {
+    return null
+  }
+}
+
 function currentMonthKey(): string {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, '0')
   return `${now.getFullYear()}-${month}`
+}
+
+const APPLE_BUILTIN_APPS = new Set([
+  'App Store.app',
+  'Books.app',
+  'Calendar.app',
+  'Contacts.app',
+  'FaceTime.app',
+  'Mail.app',
+  'Messages.app',
+  'Music.app',
+  'Notes.app',
+  'Photos.app',
+  'Podcasts.app',
+  'Preview.app',
+  'QuickTime Player.app',
+  'Reminders.app',
+  'Safari.app',
+  'System Settings.app',
+  'System Preferences.app',
+  'TV.app',
+])
+
+const APPLE_BUILTIN_UTILITIES = new Set([
+  'Activity Monitor.app',
+  'Console.app',
+  'Disk Utility.app',
+  'Migration Assistant.app',
+  'Terminal.app',
+])
+
+function isProtectedAppleSystemApp(itemPath: string): boolean {
+  if (itemPath.startsWith('/System/Applications/')) return true
+  if (itemPath.startsWith('/System/Library/CoreServices/')) return true
+
+  const appName = path.basename(itemPath)
+  if (itemPath.startsWith('/Applications/') && APPLE_BUILTIN_APPS.has(appName)) return true
+  if (itemPath.startsWith('/Applications/Utilities/') && APPLE_BUILTIN_UTILITIES.has(appName)) return true
+  return false
+}
+
+function isContentOnlyProtectedRoot(itemPath: string): boolean {
+  return /^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures|\.Trash)$/.test(itemPath)
+    || /^\/Users\/[^/]+\/Library\/(Caches|Logs|HTTPStorages|Saved Application State|WebKit)$/.test(itemPath)
+}
+
+function isProtectedDeletePath(itemPath: string): boolean {
+  const home = os.homedir()
+  const normalized = itemPath.replace(/\/+$/, '')
+
+  const exactProtected = new Set([
+    '/',
+    '/Users',
+    '/System',
+    '/System/Library',
+    '/Library',
+    '/Applications',
+    '/bin',
+    '/lib',
+    '/sbin',
+    '/usr',
+    '/usr/bin',
+    '/usr/lib',
+    '/usr/local',
+    '/etc',
+    '/var',
+    '/private',
+    '/private/etc',
+    '/private/var',
+    '/private/tmp',
+    '/Volumes',
+    '/Network',
+    '/cores',
+    home,
+    `${home}/Library`,
+    `${home}/Applications`,
+    `${home}/Library/Application Scripts`,
+    `${home}/Library/Application Support`,
+    `${home}/Library/Assistants`,
+    `${home}/Library/Audio`,
+    `${home}/Library/Autosave Information`,
+    `${home}/Library/ColorPickers`,
+    `${home}/Library/ColorSync`,
+    `${home}/Library/Components`,
+    `${home}/Library/Containers`,
+    `${home}/Library/Contextual Menu Items`,
+    `${home}/Library/Cookies`,
+    `${home}/Library/Developer`,
+    `${home}/Library/Dictionaries`,
+    `${home}/Library/Documentation`,
+    `${home}/Library/Extensions`,
+    `${home}/Library/Favorites`,
+    `${home}/Library/Fonts`,
+    `${home}/Library/Group Containers`,
+    `${home}/Library/Internet Plug-ins`,
+    `${home}/Library/Keyboards`,
+    `${home}/Library/Keychains`,
+    `${home}/Library/LaunchAgents`,
+    `${home}/Library/LaunchDaemons`,
+    `${home}/Library/Mail`,
+    `${home}/Library/Messages`,
+    `${home}/Library/Mobile Documents`,
+    `${home}/Library/PreferencePanes`,
+    `${home}/Library/Preferences`,
+    `${home}/Library/Printers`,
+    `${home}/Library/QuickLook`,
+    `${home}/Library/QuickTime`,
+    `${home}/Library/Safari`,
+    `${home}/Library/Scripting Additions`,
+    `${home}/Library/Sounds`,
+    `${home}/Library/CloudStorage`,
+    `${home}/Desktop`,
+    `${home}/Documents`,
+    `${home}/Downloads`,
+    `${home}/Movies`,
+    `${home}/Music`,
+    `${home}/Pictures`,
+    `${home}/.Trash`,
+    `${home}/Library/Caches`,
+    `${home}/Library/Logs`,
+    `${home}/Library/HTTPStorages`,
+    `${home}/Library/Saved Application State`,
+    `${home}/Library/WebKit`,
+  ])
+
+  if (exactProtected.has(normalized)) return true
+  if (isProtectedAppleSystemApp(normalized)) return true
+
+  const blockedPrefixes = [
+    '/System/',
+    '/Library/',
+    '/usr/',
+    '/var/',
+    '/private/',
+    '/bin/',
+    '/lib/',
+    '/sbin/',
+    `${home}/Library/Containers/`,
+    `${home}/Library/CloudStorage/`,
+    `${home}/Library/Fonts/`,
+    `${home}/Library/Group Containers/`,
+    `${home}/Library/Keychains/`,
+    `${home}/Library/Mail/`,
+    `${home}/Library/Messages/`,
+    `${home}/Library/Mobile Documents/`,
+    `${home}/Library/Safari/`,
+  ]
+
+  if (blockedPrefixes.some((prefix) => normalized.startsWith(prefix))) return true
+  if (/^\/Users\/[^/]+$/.test(normalized)) return true
+  if (isContentOnlyProtectedRoot(normalized)) return true
+  return false
 }
 
 function formatSizeForPrompt(sizeKB: number): string {
@@ -246,11 +435,14 @@ let pullAbort: AbortController | null = null
 // Locations under ~/Library that commonly hold per-app data
 const LEFTOVER_LOCATIONS = [
   path.join('Library', 'Application Support'),
-  path.join('Library', 'Caches'),
+  path.join('Library', 'Application Scripts'),
+  path.join('Library', 'Autosave Information'),
   path.join('Library', 'Containers'),
   path.join('Library', 'Group Containers'),
-  path.join('Library', 'Logs'),
+  path.join('Library', 'HTTPStorages'),
   path.join('Library', 'Preferences'),  // .plist files
+  path.join('Library', 'Saved Application State'),
+  path.join('Library', 'WebKit'),
 ]
 
 // Prefixes that unconditionally mark a Library entry as system/Apple-owned.
@@ -322,12 +514,55 @@ const APPLE_APP_NAMES = new Set([
   'gradle', 'maven', 'sbt',
 ])
 
+const NON_APP_WORDS = new Set([
+  'agent', 'cache', 'cli', 'daemon', 'database', 'db', 'framework',
+  'helper', 'runtime', 'sdk', 'service',
+])
+const NON_APP_SUFFIXES = [
+  'agent', 'cache', 'caches', 'cli', 'daemon', 'database', 'db',
+  'framework', 'helper', 'runtime', 'sdk', 'service', 'services',
+]
+
+function looksLikeBundleId(name: string): boolean {
+  return /^[a-z0-9-]+(\.[a-z0-9-]+){1,}$/.test(name)
+}
+
+function looksLikeAppCandidate(rawName: string): boolean {
+  const name = rawName.trim().toLowerCase()
+  if (!name) return false
+
+  // Bundle IDs are strong evidence of app-owned data.
+  if (looksLikeBundleId(name)) return true
+
+  const compact = name.replace(/[^a-z0-9]+/g, '')
+  if (compact.length < 3) return false
+
+  const words = name.split(/[\s._-]+/).filter(Boolean)
+  if (words.length === 0) return false
+
+  // Reject entries that are purely technical components / databases / runtimes.
+  if (words.every((word) => NON_APP_WORDS.has(word))) return false
+  if (words[words.length - 1] && NON_APP_WORDS.has(words[words.length - 1])) return false
+  if (NON_APP_SUFFIXES.some((suffix) => compact.endsWith(suffix))) return false
+
+  // Treat human-readable names as app candidates only when they are not
+  // generic technical labels.
+  return words.some((word) => /[a-z]/.test(word) && !NON_APP_WORDS.has(word))
+}
+
 function addWords(ids: Set<string>, text: string) {
+  const normalized = text.trim().toLowerCase()
+  if (!normalized) return
+
   // Always index the full string as-is
-  ids.add(text)
+  ids.add(normalized)
+  // Also index a compact alphanumeric form so "Google Chrome" and
+  // "googlechrome" can match the same installed app identity.
+  const compact = normalized.replace(/[^a-z0-9]+/g, '')
+  if (compact.length >= 5) ids.add(compact)
   // Index each segment split on non-alphanumeric runs, min 5 chars to avoid noise
   // (e.g. 'com.google.chrome' → 'google', 'chrome'; NOT 'com' which is too generic)
-  for (const word of text.split(/[\s.\-_]+/)) {
+  for (const word of normalized.split(/[\s.\-_]+/)) {
     if (word.length >= 5) ids.add(word)
   }
 }
@@ -335,6 +570,106 @@ function addWords(ids: Set<string>, text: string) {
 async function getInstalledAppIdentifiers(): Promise<Set<string>> {
   const ids = new Set<string>()
   const home = os.homedir()
+  const brewPrefixes = ['/opt/homebrew', '/usr/local']
+
+  async function indexAppBundle(appPath: string, fallbackName: string) {
+    addWords(ids, fallbackName.replace(/\.app$/, '').toLowerCase())
+
+    const plistPath = path.join(appPath, 'Contents', 'Info.plist')
+    for (const key of ['CFBundleIdentifier', 'CFBundleName', 'CFBundleDisplayName', 'CFBundleExecutable']) {
+      try {
+        const { stdout } = await execFileAsync(
+          '/usr/bin/plutil',
+          ['-extract', key, 'raw', '-o', '-', plistPath],
+          { timeout: 1500 }
+        )
+        const value = stdout.trim().toLowerCase()
+        if (value) addWords(ids, value)
+      } catch {
+        // plist key missing or unreadable — keep indexing whatever we can
+      }
+    }
+  }
+
+  async function indexHomebrewInstallations() {
+    // 4a. Homebrew casks
+    // Cask names often don't match the .app display name (e.g. "google-chrome" ≠ "Google Chrome").
+    // The cask folder name is the canonical identifier we index here.
+    for (const prefix of brewPrefixes) {
+      const caskRoot = path.join(prefix, 'Caskroom')
+      try {
+        const casks = await readdir(caskRoot)
+        for (const cask of casks) addWords(ids, cask.toLowerCase())
+      } catch { /* not present on this machine */ }
+    }
+
+    // 4b. Homebrew formulas in the Cellar
+    // Index formula names and common binary names shipped by each keg, so CLI tools
+    // installed by brew also prevent matching Library data as leftovers.
+    await Promise.allSettled(
+      brewPrefixes.map(async (prefix) => {
+        const cellarRoot = path.join(prefix, 'Cellar')
+        try {
+          const formulas = await readdir(cellarRoot)
+          await Promise.allSettled(
+            formulas.map(async (formula) => {
+              addWords(ids, formula.toLowerCase())
+
+              const formulaRoot = path.join(cellarRoot, formula)
+              let versions: string[] = []
+              try {
+                versions = await readdir(formulaRoot)
+              } catch {
+                return
+              }
+
+              await Promise.allSettled(
+                versions.map(async (version) => {
+                  for (const relDir of ['bin', path.join('libexec', 'bin'), 'sbin']) {
+                    const dir = path.join(formulaRoot, version, relDir)
+                    try {
+                      const entries = await readdir(dir)
+                      for (const entry of entries) addWords(ids, entry.toLowerCase())
+                    } catch {
+                      // dir missing for this formula/version
+                    }
+                  }
+                })
+              )
+            })
+          )
+        } catch {
+          // Homebrew not installed at this prefix
+        }
+      })
+    )
+
+    // 4c. Homebrew-linked CLI shims in bin/sbin
+    // Many active formulas expose executables here via symlinks into the Cellar.
+    for (const prefix of brewPrefixes) {
+      for (const relDir of ['bin', 'sbin']) {
+        const linkDir = path.join(prefix, relDir)
+        try {
+          const entries = await readdir(linkDir)
+          await Promise.allSettled(
+            entries.map(async (entry) => {
+              const fullPath = path.join(linkDir, entry)
+              try {
+                const resolved = await realpath(fullPath)
+                if (resolved.includes(`${path.sep}Cellar${path.sep}`) || resolved.includes(`${path.sep}Caskroom${path.sep}`)) {
+                  addWords(ids, entry.toLowerCase())
+                }
+              } catch {
+                // broken symlink or unreadable target
+              }
+            })
+          )
+        } catch {
+          // prefix/bin or prefix/sbin missing
+        }
+      }
+    }
+  }
 
   // ── 1. Installed .app bundles ────────────────────────────────────────────────
   // Scan standard app locations plus Setapp (if present).
@@ -351,30 +686,30 @@ async function getInstalledAppIdentifiers(): Promise<Set<string>> {
       try {
         const entries = await readdir(dir)
         const apps = entries.filter((n) => n.endsWith('.app'))
-        await Promise.allSettled(
-          apps.map(async (appName) => {
-            const displayName = appName.replace(/\.app$/, '').toLowerCase()
-            addWords(ids, displayName)
-
-            const plistPath = path.join(dir, appName, 'Contents', 'Info.plist')
-            try {
-              const { stdout } = await execFileAsync(
-                'plutil',
-                ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', plistPath],
-                { timeout: 1500 }
-              )
-              const bundleId = stdout.trim().toLowerCase()
-              if (bundleId) addWords(ids, bundleId)
-            } catch {
-              // plutil unavailable or plist missing — display name words are enough
-            }
-          })
-        )
+        await Promise.allSettled(apps.map((appName) => indexAppBundle(path.join(dir, appName), appName)))
       } catch {
         // directory does not exist
       }
     })
   )
+
+  // ── 1b. Spotlight-discovered app bundles ───────────────────────────────────
+  // Catches installed apps that live outside the standard folders, such as
+  // custom locations or developer tools bundled inside dependencies.
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/mdfind', [
+      'kMDItemContentTypeTree == "com.apple.application-bundle"'
+    ], { timeout: 4000, maxBuffer: 1024 * 1024 * 8 })
+    const appPaths = stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.endsWith('.app'))
+    await Promise.allSettled(
+      appPaths.slice(0, 4000).map((appPath) => indexAppBundle(appPath, path.basename(appPath)))
+    )
+  } catch {
+    // Spotlight unavailable or timed out — standard app dirs above are still used.
+  }
 
   // ── 2. ~/Library/Containers ─────────────────────────────────────────────────
   // The most authoritative source: macOS ONLY creates a container for a sandboxed
@@ -395,16 +730,8 @@ async function getInstalledAppIdentifiers(): Promise<Set<string>> {
     for (const gc of gcs) addWords(ids, gc.toLowerCase())
   } catch { /* directory missing */ }
 
-  // ── 4. Homebrew Cask installs ────────────────────────────────────────────────
-  // Cask names often don't match the .app display name (e.g. "google-chrome" ≠ "Google Chrome").
-  // The cask folder name is the canonical identifier we index here.
-  const caskRoots = ['/opt/homebrew/Caskroom', '/usr/local/Caskroom']
-  for (const root of caskRoots) {
-    try {
-      const casks = await readdir(root)
-      for (const c of casks) addWords(ids, c.toLowerCase())
-    } catch { /* not present on this machine */ }
-  }
+  // ── 4. Homebrew installs (casks + formulas + linked CLIs) ──────────────────
+  await indexHomebrewInstallations()
 
   // ── 5. LaunchAgent / LaunchDaemon plists ────────────────────────────────────
   // Background services installed by apps write .plist files here. The filename
@@ -414,6 +741,8 @@ async function getInstalledAppIdentifiers(): Promise<Set<string>> {
     path.join(home, 'Library', 'LaunchAgents'),
     '/Library/LaunchAgents',
     '/Library/LaunchDaemons',
+    '/System/Library/LaunchAgents',
+    '/System/Library/LaunchDaemons',
   ]
   for (const launchDir of launchDirs) {
     try {
@@ -466,8 +795,10 @@ function isKnownApp(itemName: string, installedIds: Set<string>): boolean {
   const name = itemName.toLowerCase()
     .replace(/\.plist$/, '')
     .replace(/\.prefpane$/, '')
+  const compactName = name.replace(/[^a-z0-9]+/g, '')
 
   if (!name) return true
+  if (!looksLikeAppCandidate(name)) return true
 
   // ── System prefix check ───────────────────────────────────────────────────
   for (const prefix of SYSTEM_PREFIXES) {
@@ -491,6 +822,7 @@ function isKnownApp(itemName: string, installedIds: Set<string>): boolean {
 
   // ── Exact match against installed identifiers ─────────────────────────────
   if (installedIds.has(name)) return true
+  if (compactName.length >= 5 && installedIds.has(compactName)) return true
 
   // ── Segment-level match for bundle-ID–style names ─────────────────────────
   // "com.google.chrome" → segments: ['google', 'chrome']
@@ -649,20 +981,34 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('trash-entries', async (_event, paths: string[]) => {
     const home = os.homedir()
+    const userTrash = `${home}/.Trash`
     const CONTENT_ONLY_DIRS = new Set([
+      `${home}/Documents`,
       `${home}/Desktop`,
       `${home}/Downloads`,
-      `${home}/Documents`,
       `${home}/Movies`,
       `${home}/Music`,
       `${home}/Pictures`,
+      `${home}/.Trash`,
+      // macOS sets a "deny delete" ACL on these dirs so the folder itself can't be
+      // trashed — expand to children instead so each item gets deleted individually.
+      `${home}/Library/HTTPStorages`,
+      `${home}/Library/Logs`,
+      `${home}/Library/Caches`,
+      `${home}/Library/Saved Application State`,
+      `${home}/Library/WebKit`,
     ])
+    const deleteImmediately = loadSettings().deleteImmediately === true
 
     const prepErrors: string[] = []
     const expandedTargets: string[] = []
 
     for (const originalPath of paths) {
       const normalized = originalPath.replace(/\/+$/, '')
+      if (isProtectedDeletePath(normalized) && !CONTENT_ONLY_DIRS.has(normalized)) {
+        prepErrors.push(`Protected path cannot be deleted: ${normalized}`)
+        continue
+      }
       if (!CONTENT_ONLY_DIRS.has(normalized)) {
         expandedTargets.push(originalPath)
         continue
@@ -714,7 +1060,18 @@ export function registerIpcHandlers(): void {
     let deletedCount = 0
     for (const p of effectivePaths) {
       try {
-        await shell.trashItem(p)
+        const normalizedPath = p.replace(/\/+$/, '')
+        const isAlreadyInTrash =
+          normalizedPath === userTrash || normalizedPath.startsWith(userTrash + path.sep)
+
+        // Mixed selections are handled per-item:
+        // - items already in Trash are always removed permanently
+        // - everything else follows the user's deleteImmediately preference
+        if (deleteImmediately || isAlreadyInTrash) {
+          await rm(p, { recursive: true, force: false })
+        } else {
+          await shell.trashItem(p)
+        }
         deletedCount += 1
         _event.sender.send('trash-progress', { path: p, success: true })
       } catch (err) {
@@ -1069,13 +1426,27 @@ What is this item and is it safe to delete?`
 
   ipcMain.handle('check-full-disk-access', async () => {
     try {
-      // ~/Library/Safari is readable only with Full Disk Access
-      await readdir(path.join(os.homedir(), 'Library', 'Safari'))
+      // /Library/Application Support/com.apple.TCC is readable only with Full Disk Access
+      // and is guaranteed to exist on all macOS systems.
+      await readdir('/Library/Application Support/com.apple.TCC')
       return true
     } catch {
       return false
     }
   })
+
+  ipcMain.handle('relaunch-app', () => {
+    app.relaunch()
+    app.exit(0)
+  })
+
+  ipcMain.handle('get-electron-exe-path', () => {
+    // Returns the path to the running executable.
+    // In dev mode this points into node_modules/electron/dist/Electron.app.
+    return app.getPath('exe')
+  })
+
+  ipcMain.handle('check-notification-permission', () => checkNotificationPermissionStatus())
 
   ipcMain.handle('check-ollama', async () => {
     try {
