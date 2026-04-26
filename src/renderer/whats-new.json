@@ -1,6 +1,33 @@
 {
   "releases": [
     {
+      "version": "1.3.1",
+      "date": "April 2026",
+      "description": "This update adds faster cleanup controls, smarter Smart Clean recommendations, and clearer protection for important folders.",
+      "items": [
+        {
+          "icon": "Trash",
+          "title": "Instantly Delete Items",
+          "description": "You can now delete files and folders instantly from the app, without the need to send them to the trash. Just open settings and toggle 'Delete items immediately' to enable this feature."
+        },
+        {
+          "icon": "Sparkles",
+          "title": "Trash in Smart Clean",
+          "description": "Smart Clean can now detect Trash contents, recommend them automatically, and include Trash in Quick Scan so it's easier to clear space in one pass."
+        },
+        {
+          "icon": "Shield",
+          "title": "Protected Folder Indicators",
+          "description": "Important macOS folders now show a clear Protected badge in the block view, list view, Smart Clean, and review screen so it's easier to understand what should stay untouched."
+        },
+        {
+          "icon": "Zap",
+          "title": "Bug Fixes & Polish",
+          "description": "We've squashed some bugs and made various small improvements to make your experience smoother and more enjoyable."
+        }
+      ]
+    },
+    {
       "version": "1.3.0",
       "date": "April 2026",
       "description": "This update adds faster cleanup controls, smarter Smart Clean recommendations, and clearer protection for important folders.",
