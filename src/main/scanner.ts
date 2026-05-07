@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { promises as fsp } from 'node:fs'
+import type { Dirent } from 'node:fs'
 import * as path from 'node:path'
 import { getAppPlatform, resolveScannerBinaryPath } from './platform'
 
@@ -59,9 +61,10 @@ function spawnNativeScanner(
   lowPriority = false
 ): () => void {
   const scannerPath = getAppPlatform() === 'windows' ? dirPath.replace(/\//g, '\\') : dirPath
-  // Wrap with `nice -n 10` in low-priority mode to reduce CPU/IO pressure
-  const cmd = lowPriority ? 'nice' : binary
-  const args = lowPriority ? ['-n', '10', binary, scannerPath] : [scannerPath]
+  // Wrap with `nice -n 10` in low-priority mode to reduce CPU/IO pressure (Unix only)
+  const isWindows = getAppPlatform() === 'windows'
+  const cmd = (lowPriority && !isWindows) ? 'nice' : binary
+  const args = (lowPriority && !isWindows) ? ['-n', '10', binary, scannerPath] : [scannerPath]
   const proc = spawn(cmd, args, {
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -151,6 +154,55 @@ function spawnDuFallback(
   }
 }
 
+function spawnNodeFallback(
+  dirPath: string,
+  onEntry: (entry: DiskEntry) => void,
+  onDone: (error?: string) => void
+): () => void {
+  let cancelled = false
+
+  async function walk(dir: string): Promise<number> {
+    if (cancelled) return 0
+    let entries: Dirent[]
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true })
+    } catch {
+      return 0
+    }
+    let total = 0
+    for (const ent of entries) {
+      if (cancelled) break
+      const childPath = path.join(dir, ent.name)
+      if (ent.isSymbolicLink()) continue
+      if (ent.isDirectory()) {
+        const size = await walk(childPath)
+        total += size
+        if (!cancelled) onEntry({ name: ent.name, path: childPath, sizeKB: Math.round(size / 1024), isDir: true })
+      } else if (ent.isFile()) {
+        try {
+          const stat = await fsp.stat(childPath)
+          total += stat.size
+          if (!cancelled) onEntry({ name: ent.name, path: childPath, sizeKB: Math.round(stat.size / 1024), isDir: false })
+        } catch { /* skip inaccessible files */ }
+      }
+    }
+    return total
+  }
+
+  ;(async () => {
+    try {
+      const stat = await fsp.stat(dirPath)
+      if (!stat.isDirectory()) { onDone('Scan root is not a directory'); return }
+      await walk(dirPath)
+      if (!cancelled) onDone()
+    } catch (err: unknown) {
+      if (!cancelled) onDone((err as Error).message)
+    }
+  })()
+
+  return () => { cancelled = true }
+}
+
 export function scanDirectoryStreaming(
   dirPath: string,
   onEntry: (entry: DiskEntry) => void,
@@ -164,6 +216,9 @@ export function scanDirectoryStreaming(
   }
   if (getAppPlatform() === 'macos') {
     return spawnDuFallback(dirPath, onEntry, onDone, low)
+  }
+  if (getAppPlatform() === 'windows') {
+    return spawnNodeFallback(dirPath, onEntry, onDone)
   }
   queueMicrotask(() => onDone('Native scanner binary not found'))
   return () => {}

@@ -1,5 +1,22 @@
 {
   "releases": [
+        {
+      "version": "1.4.7",
+      "date": "May 2026",
+      "description": "This update improves Windows quick scans when some system folders are harder to read.",
+      "items": [
+        {
+          "icon": "Folder",
+          "title": "Safer Windows Quick Scan",
+          "description": "Quick Scan no longer fails just because one Windows scan root is unreadable. Nerion now keeps the successful scan results instead of aborting the whole scan."
+        },
+        {
+          "icon": "Shield",
+          "title": "Better Default Scan Roots",
+          "description": "The Windows default quick scan folders are now more conservative, reducing first-run scan failures caused by protected locations like Recycle Bin."
+        }
+      ]
+    },
     {
       "version": "1.4.6",
       "date": "May 2026",
