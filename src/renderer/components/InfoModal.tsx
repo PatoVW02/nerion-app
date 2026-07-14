@@ -134,7 +134,7 @@ export function InfoModal({ entry, onClose, onTrash }: InfoModalProps) {
       onClick={onClose}
     >
       <div
-        className="bg-zinc-900 border border-white/10 rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:w-[500px] sm:max-w-full max-h-[90vh] flex flex-col overflow-hidden"
+        className="glass-popover border rounded-t-2xl sm:rounded-2xl w-full sm:w-[500px] sm:max-w-full max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

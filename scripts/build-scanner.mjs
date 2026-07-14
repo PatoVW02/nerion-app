@@ -31,11 +31,31 @@ const resolvedTarget = target ?? hostTarget()
 const isWindowsTarget = resolvedTarget.includes('windows')
 const binaryName = isWindowsTarget ? 'scanner-bin.exe' : 'scanner-bin'
 const outputBinary = outPath ?? join(projectRoot, 'resources', binaryName)
+const scannerProjectDir = join(projectRoot, 'native', 'scanner-rs')
+
+const cargoArgs = [
+  'build',
+  '--manifest-path',
+  join(scannerProjectDir, 'Cargo.toml'),
+  ...(release ? ['--release'] : []),
+  '--target',
+  resolvedTarget,
+]
+
+const cargoEnv = { ...process.env }
+if (isWindowsTarget) {
+  // Avoid runtime dependency on vcruntime/msvcp DLLs so scanner-bin.exe runs on
+  // clean Windows installs without requiring the VC++ redistributable.
+  const staticCrtFlag = '-C target-feature=+crt-static'
+  cargoEnv.RUSTFLAGS = cargoEnv.RUSTFLAGS
+    ? `${cargoEnv.RUSTFLAGS} ${staticCrtFlag}`
+    : staticCrtFlag
+}
 
 execFileSync(
   'cargo',
-  ['build', '--manifest-path', join(projectRoot, 'native', 'scanner-rs', 'Cargo.toml'), ...(release ? ['--release'] : []), '--target', resolvedTarget],
-  { cwd: projectRoot, stdio: 'inherit' }
+  cargoArgs,
+  { cwd: scannerProjectDir, stdio: 'inherit', env: cargoEnv }
 )
 
 const profile = release ? 'release' : 'debug'

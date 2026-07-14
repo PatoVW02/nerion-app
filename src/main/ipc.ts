@@ -1,29 +1,48 @@
 import { ipcMain, dialog, shell, net, Notification, app } from 'electron'
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
-import { stat, readdir, realpath, rm } from 'node:fs/promises'
+import { stat, readdir, realpath } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { scanDirectoryStreaming } from './scanner'
 import { loadSettings, saveSettings, patchSettings, NerionSettings } from './settings'
-import { rebuildTrayMenu, scheduleBackgroundScan, stopBackgroundScan, runBackgroundScan, updateLastScanPath, setTrayVisibility, testNotification } from './background'
-import { getLicenseInfo, activateLicense, revalidateLicense, deactivateLicense } from './license'
+import { rebuildTrayMenu, scheduleBackgroundScan, stopBackgroundScan, runBackgroundScan, updateLastScanPath, setTrayVisibility, setQuitting, testNotification } from './background'
+import { getLicenseInfo, activateLicense, startLicenseValidationService, deactivateLicense } from './license'
 import { runAutoUpdateCheck, installDownloadedUpdateNow, isUpdateReadyToInstall } from './updater'
-import { getPlatformMeta, revealInFileManager, supportsFullDiskAccess } from './platform'
-import {
-  getDefaultQuickScanFolders,
-  isContentOnlyProtectedRoot as sharedIsContentOnlyProtectedRoot,
-  isCriticalPath as sharedIsCriticalPath,
-} from '../shared/policy'
+import { getPlatformAppearance, getPlatformMeta, revealInFileManager, supportsFullDiskAccess } from './platform'
+import { SCAN_PROTOCOL_VERSION, type DeleteBatchResult, type LeftoverScanResult, type ScanEntryV1, type ScanIssueV1, type ScanSummaryV1, type ScanSuspiciousV1, type SuspiciousFinding } from '../shared/contracts'
+import { collapseOverlappingPaths, isSameOrDescendantPath } from '../shared/path-utils'
+import { deleteRequestedPaths } from './deletion'
+import { findAppLeftovers } from './leftovers'
+import { inspectMasqueradingEntry, inspectSuspiciousPersistence } from './suspicious'
+import { getAiCapabilities, getCloudAiConfig, normalizeAiMode } from './ai-config'
+import { isAllowedExternalUrl } from './security'
+import { isValidIpcPath, normalizeNonNegativeKilobytes, normalizeRendererSettings, parseOllamaPullRecord } from './runtime-policy'
 
 const execFileAsync = promisify(execFile)
 
 let cancelCurrentScan: (() => void) | null = null
+let currentScanId: string | null = null
+let deletionInProgress = false
+let leftoverScanInFlight: Promise<LeftoverScanResult> | null = null
 
 // Ollama state — tracked per active request
 let ollamaAbort: AbortController | null = null
-let ollamaUserCancelled = false
+let ollamaRequestSequence = 0
 const FREE_DELETE_LIMIT_PER_MONTH = 15
+
+export function disposeIpcRuntime(): void {
+  cancelCurrentScan?.()
+  cancelCurrentScan = null
+  currentScanId = null
+  ollamaRequestSequence += 1
+  ollamaAbort?.abort()
+  ollamaAbort = null
+  pullRequestSequence += 1
+  pullAbort?.abort()
+  pullAbort = null
+}
 
 async function checkNotificationPermissionStatus(): Promise<boolean | null> {
   if (process.platform === 'win32') return Notification.isSupported() ? true : null
@@ -32,20 +51,26 @@ async function checkNotificationPermissionStatus(): Promise<boolean | null> {
   try {
     const userTCC = path.join(os.homedir(), 'Library', 'Application Support', 'com.apple.TCC', 'TCC.db')
     const clientIds = Array.from(new Set([
-      app.getBundleID(),
       'com.patricio.nerion',
       'com.github.Electron',
       'com.github.electron',
     ].filter((value): value is string => !!value)))
 
     const quotedClients = clientIds.map((clientId) => `'${clientId.replace(/'/g, "''")}'`).join(', ')
+    const { stdout: schemaOutput } = await execFileAsync('/usr/bin/sqlite3', [userTCC, 'PRAGMA table_info(access);'])
+    const columns = new Set(
+      schemaOutput
+        .split(/\r?\n/)
+        .map((line) => line.split('|')[1])
+        .filter((column): column is string => typeof column === 'string' && column.length > 0),
+    )
+    const permissionExpression = columns.has('auth_value')
+      ? 'auth_value'
+      : columns.has('allowed') ? 'CASE WHEN allowed = 1 THEN 2 ELSE 0 END' : null
+    if (!permissionExpression) return null
     const query = [
       'SELECT',
-      "  CASE",
-      "    WHEN auth_value IS NOT NULL THEN auth_value",
-      "    WHEN allowed IS NOT NULL THEN CASE WHEN allowed = 1 THEN 2 ELSE 0 END",
-      '    ELSE NULL',
-      '  END AS permission',
+      `  ${permissionExpression} AS permission`,
       'FROM access',
       "WHERE service='kTCCServiceUserNotification'",
       `  AND client IN (${quotedClients})`,
@@ -98,7 +123,7 @@ const APPLE_BUILTIN_UTILITIES = new Set([
   'Terminal.app',
 ])
 
-function isProtectedAppleSystemApp(itemPath: string): boolean {
+export function isProtectedAppleSystemApp(itemPath: string): boolean {
   if (itemPath.startsWith('/System/Applications/')) return true
   if (itemPath.startsWith('/System/Library/CoreServices/')) return true
 
@@ -106,14 +131,6 @@ function isProtectedAppleSystemApp(itemPath: string): boolean {
   if (itemPath.startsWith('/Applications/') && APPLE_BUILTIN_APPS.has(appName)) return true
   if (itemPath.startsWith('/Applications/Utilities/') && APPLE_BUILTIN_UTILITIES.has(appName)) return true
   return false
-}
-
-function isContentOnlyProtectedRoot(itemPath: string): boolean {
-  return sharedIsContentOnlyProtectedRoot(itemPath, process.platform === 'win32' ? 'windows' : 'macos', os.homedir())
-}
-
-function isProtectedDeletePath(itemPath: string): boolean {
-  return sharedIsCriticalPath(itemPath, process.platform === 'win32' ? 'windows' : 'macos', os.homedir())
 }
 
 function formatSizeForPrompt(sizeKB: number): string {
@@ -268,7 +285,7 @@ function getPathContext(itemPath: string): string {
 }
 
 /** Infer a human-readable app name from a macOS bundle ID or .app name. */
-function inferAppName(name: string): string | null {
+export function inferAppName(name: string): string | null {
   // Strip .app suffix
   const withoutApp = name.endsWith('.app') ? name.slice(0, -4) : name
 
@@ -286,7 +303,7 @@ function inferAppName(name: string): string | null {
 }
 
 /** Return a file-type hint for common extensions to help the AI give a better verdict. */
-function getFileTypeHint(name: string, isDir: boolean): string {
+export function getFileTypeHint(name: string, isDir: boolean): string {
   if (isDir) {
     const lower = name.toLowerCase()
     if (lower === 'node_modules')       return 'npm/yarn dependency directory — safe to delete; regenerated by running npm install.'
@@ -362,11 +379,12 @@ async function pickOllamaModel(): Promise<string> {
 }
 
 let pullAbort: AbortController | null = null
+let pullRequestSequence = 0
 
 // ── App leftover detection ────────────────────────────────────────────────────
 
 // Locations under ~/Library that commonly hold per-app data
-const LEFTOVER_LOCATIONS = [
+export const LEFTOVER_LOCATIONS = [
   path.join('Library', 'Application Support'),
   path.join('Library', 'Application Scripts'),
   path.join('Library', 'Autosave Information'),
@@ -500,7 +518,7 @@ function addWords(ids: Set<string>, text: string) {
   }
 }
 
-async function getInstalledAppIdentifiers(): Promise<Set<string>> {
+export async function getInstalledAppIdentifiers(): Promise<Set<string>> {
   const ids = new Set<string>()
   const home = os.homedir()
   const brewPrefixes = ['/opt/homebrew', '/usr/local']
@@ -815,7 +833,7 @@ async function getEntrySizeKB(entryPath: string, deadlineMs = Date.now() + 8000)
   return Math.round(totalBytes / 1024)
 }
 
-async function findLeftoversInDir(
+export async function findLeftoversInDir(
   dirPath: string,
   locationLabel: string,
   installedIds: Set<string>,
@@ -847,57 +865,192 @@ async function findLeftoversInDir(
 export function registerIpcHandlers(): void {
   // ── Scanner ──────────────────────────────────────────────────────────────
 
-  ipcMain.on('scan-start', (event, pathOrPaths: string | string[]) => {
+  ipcMain.on('scan-start', (event, request: string | string[] | { scanId: string; paths: string[] }) => {
     if (cancelCurrentScan) {
       cancelCurrentScan()
       cancelCurrentScan = null
     }
-    const paths = Array.isArray(pathOrPaths) ? [...pathOrPaths] : [pathOrPaths]
+    const structuredRequest = request !== null && typeof request === 'object' && !Array.isArray(request) ? request : null
+    const requestedScanId = structuredRequest && typeof structuredRequest.scanId === 'string' && structuredRequest.scanId
+      && /^[A-Za-z0-9_-]{1,128}$/.test(structuredRequest.scanId)
+      ? structuredRequest.scanId
+      : randomUUID()
+    const requestedPaths = structuredRequest && Array.isArray(structuredRequest.paths)
+      ? structuredRequest.paths
+      : Array.isArray(request) ? request : typeof request === 'string' ? [request] : []
+    const platform = process.platform === 'win32' ? 'windows' : 'macos'
+    const paths = collapseOverlappingPaths(
+      requestedPaths
+        .filter(isValidIpcPath)
+        .filter((value) => platform === 'windows' ? path.win32.isAbsolute(value) : path.posix.isAbsolute(value))
+        .slice(0, 64),
+      platform,
+    )
+    const securityEnabled = getLicenseInfo().active
+    currentScanId = requestedScanId
 
-    const send = (channel: string, data: unknown) => {
-      if (!event.sender.isDestroyed()) event.sender.send(channel, data)
+    const send = (data: unknown) => {
+      if (currentScanId === requestedScanId && !event.sender.isDestroyed()) event.sender.send('scan-event', data)
     }
 
-    if (paths.length === 1) {
-      // Single path — simple case, no coordination needed
-      cancelCurrentScan = scanDirectoryStreaming(
-        paths[0],
-        (entry) => send('scan-entry', entry),
-        (error) => { cancelCurrentScan = null; send('scan-done', error ?? null) }
-      )
-    } else {
-      // Multiple paths — scan all in parallel so every root populates concurrently
-      // (e.g. ~/Library and ~/Downloads appear in the treemap at the same time).
-      const cancellers: Array<() => void> = []
-      let completed = 0
-      let doneSent = false
-      let successfulRoots = 0
-      const errors: string[] = []
+    if (paths.length === 0) {
+      send({
+        protocolVersion: SCAN_PROTOCOL_VERSION,
+        event: 'summary',
+        scanId: requestedScanId,
+        rootId: null,
+        complete: false,
+        cancelled: false,
+        entryCount: 0,
+        issueCount: 0,
+        rootsCompleted: 0,
+        rootsRequested: 0,
+        fatalError: 'No readable scan roots were provided.',
+        securityAnalysis: securityEnabled ? 'partial' : 'disabled',
+        suspiciousCount: 0,
+      } satisfies ScanSummaryV1)
+      currentScanId = null
+      return
+    }
 
-      const onDone = (error?: string) => {
-        completed++
-        if (!error) successfulRoots++
-        else errors.push(error)
+    const cancellers: Array<() => void> = []
+    const summaries: ScanSummaryV1[] = []
+    const seenHardlinks = new Set<string>()
+    const crossRootDuplicateBytes = new Map<string, Array<{ path: string; bytes: number }>>()
+    const suspiciousFindings = new Map<string, SuspiciousFinding>()
+    const persistenceInspection = securityEnabled
+      ? inspectSuspiciousPersistence(platform, os.homedir()).catch(() => ({
+          findings: [] as SuspiciousFinding[],
+          complete: false,
+          inaccessiblePaths: [] as string[],
+        }))
+      : Promise.resolve({ findings: [] as SuspiciousFinding[], complete: true, inaccessiblePaths: [] as string[] })
+    let completed = 0
 
-        if (!doneSent && completed === paths.length) {
-          doneSent = true
-          if (successfulRoots > 0) send('scan-done', null)
-          else send('scan-done', errors[0] ?? 'Could not read any of the selected folders')
-        }
-      }
+    const sendSuspiciousFinding = (finding: SuspiciousFinding, rootId: string) => {
+      if (!securityEnabled) return
+      const existing = suspiciousFindings.get(finding.id)
+      const combinedFinding: SuspiciousFinding = existing ? {
+        ...finding,
+        category: existing.category === 'background-item' || finding.category === 'background-item'
+          ? 'background-item'
+          : 'masquerading-file',
+        risk: existing.risk === 'elevated' || finding.risk === 'elevated' ? 'elevated' : 'review',
+        summary: existing.category !== finding.category
+          ? 'This startup item also has a filename that deserves closer review.'
+          : finding.summary,
+        evidence: [...existing.evidence, ...finding.evidence].filter((item, index, values) => (
+          values.findIndex((candidate) => candidate.code === item.code && candidate.detail === item.detail) === index
+        )),
+        targetPath: finding.targetPath ?? existing.targetPath,
+      } : finding
+      suspiciousFindings.set(finding.id, combinedFinding)
+      send({
+        protocolVersion: SCAN_PROTOCOL_VERSION,
+        event: 'suspicious',
+        scanId: requestedScanId,
+        rootId,
+        finding: combinedFinding,
+      } satisfies ScanSuspiciousV1)
+    }
 
-      for (const dirPath of paths) {
-        cancellers.push(
-          scanDirectoryStreaming(dirPath, (entry) => send('scan-entry', entry), onDone)
-        )
-      }
+    paths.forEach((dirPath, index) => {
+      const rootId = `root-${index}`
+      crossRootDuplicateBytes.set(rootId, [])
+      cancellers.push(scanDirectoryStreaming(
+        dirPath,
+        { scanId: requestedScanId, rootId },
+        (scanEvent) => {
+          if (scanEvent.event === 'entry' && securityEnabled) {
+            const finding = inspectMasqueradingEntry(scanEvent as ScanEntryV1, platform)
+            if (finding) sendSuspiciousFinding(finding, rootId)
+          }
+          if (scanEvent.event === 'entry' && !scanEvent.isDir && scanEvent.device && scanEvent.inode) {
+            const identity = `${scanEvent.device}:${scanEvent.inode}`
+            if (seenHardlinks.has(identity) && !scanEvent.hardlinkDuplicate) {
+              crossRootDuplicateBytes.get(rootId)?.push({ path: scanEvent.path, bytes: scanEvent.allocatedBytes })
+              send({ ...scanEvent, allocatedBytes: 0, sizeKB: 0, hardlinkDuplicate: true })
+              return
+            }
+            seenHardlinks.add(identity)
+          }
+          if (scanEvent.event === 'entry' && scanEvent.isDir) {
+            const duplicateBytes = (crossRootDuplicateBytes.get(rootId) ?? [])
+              .filter((duplicate) => isSameOrDescendantPath(duplicate.path, scanEvent.path, platform))
+              .reduce((total, duplicate) => total + duplicate.bytes, 0)
+            if (duplicateBytes > 0) {
+              const allocatedBytes = Math.max(0, scanEvent.allocatedBytes - duplicateBytes)
+              send({ ...scanEvent, allocatedBytes, sizeKB: Math.ceil(allocatedBytes / 1024) })
+              return
+            }
+          }
+          if (scanEvent.event !== 'summary') send(scanEvent)
+        },
+        ({ summary }) => {
+          if (currentScanId !== requestedScanId) return
+          // Root-level scanner failures have no native issue event. Surface
+          // them alongside ordinary inaccessible paths so one failed root is
+          // not hidden merely because another root completed successfully.
+          const finalSummary = summary.fatalError
+            ? { ...summary, issueCount: summary.issueCount + 1 }
+            : summary
+          if (summary.fatalError) {
+            send({
+              protocolVersion: SCAN_PROTOCOL_VERSION,
+              event: 'issue',
+              scanId: requestedScanId,
+              rootId,
+              issue: {
+                path: dirPath,
+                code: 'scanner-error',
+                message: summary.fatalError,
+              },
+            } satisfies ScanIssueV1)
+          }
+          summaries.push(finalSummary)
+          completed += 1
+          if (completed !== paths.length) return
 
-      cancelCurrentScan = () => { cancellers.forEach((c) => c()); cancelCurrentScan = null }
+          cancelCurrentScan = null
+          void (async () => {
+            const persistence = await persistenceInspection
+            if (currentScanId !== requestedScanId) return
+            for (const finding of persistence.findings) sendSuspiciousFinding(finding, 'security-persistence')
+
+            const fatalErrors = summaries.map((item) => item.fatalError).filter((value): value is string => !!value)
+            const scanComplete = summaries.every((item) => item.complete)
+            send({
+              protocolVersion: SCAN_PROTOCOL_VERSION,
+              event: 'summary',
+              scanId: requestedScanId,
+              rootId: null,
+              complete: scanComplete,
+              cancelled: summaries.some((item) => item.cancelled),
+              entryCount: summaries.reduce((total, item) => total + item.entryCount, 0),
+              issueCount: summaries.reduce((total, item) => total + item.issueCount, 0),
+              rootsCompleted: summaries.filter((item) => !item.fatalError).length,
+              rootsRequested: paths.length,
+              fatalError: fatalErrors.length === paths.length ? fatalErrors[0] : null,
+              securityAnalysis: securityEnabled
+                ? (persistence.complete && scanComplete ? 'complete' : 'partial')
+                : 'disabled',
+              suspiciousCount: suspiciousFindings.size,
+            } satisfies ScanSummaryV1)
+            currentScanId = null
+          })()
+        },
+      ))
+    })
+
+    cancelCurrentScan = () => {
+      currentScanId = null
+      cancellers.forEach((cancel) => cancel())
+      cancelCurrentScan = null
     }
   })
 
   ipcMain.on('scan-cancel', () => {
-    if (cancelCurrentScan) { cancelCurrentScan(); cancelCurrentScan = null }
+    if (cancelCurrentScan) cancelCurrentScan()
   })
 
   // ── File operations ───────────────────────────────────────────────────────
@@ -910,139 +1063,75 @@ export function registerIpcHandlers(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
-  ipcMain.handle('open-external', (_event, url: string) => {
-    shell.openExternal(url)
+  ipcMain.handle('open-external', async (_event, url: unknown) => {
+    if (!isAllowedExternalUrl(url)) throw new Error('This link type is not allowed.')
+    await shell.openExternal(url)
   })
 
-  ipcMain.handle('reveal-in-file-manager', (_event, filePath: string) => {
+  ipcMain.handle('reveal-in-file-manager', (_event, filePath: unknown) => {
+    if (!isValidIpcPath(filePath)) throw new Error('Invalid file path.')
     revealInFileManager(filePath)
   })
 
   ipcMain.handle('trash-entries', async (_event, paths: string[]) => {
-    const home = os.homedir()
-    const userTrash = `${home}/.Trash`
-    const CONTENT_ONLY_DIRS = new Set([
-      `${home}/Documents`,
-      `${home}/Desktop`,
-      `${home}/Downloads`,
-      `${home}/Movies`,
-      `${home}/Music`,
-      `${home}/Pictures`,
-      `${home}/.Trash`,
-      // macOS sets a "deny delete" ACL on these dirs so the folder itself can't be
-      // trashed — expand to children instead so each item gets deleted individually.
-      `${home}/Library/HTTPStorages`,
-      `${home}/Library/Logs`,
-      `${home}/Library/Caches`,
-      `${home}/Library/Saved Application State`,
-      `${home}/Library/WebKit`,
-    ])
-    const deleteImmediately = loadSettings().deleteImmediately === true
-
-    const prepErrors: string[] = []
-    const expandedTargets: string[] = []
-
-    for (const originalPath of paths) {
-      const normalized = originalPath.replace(/\/+$/, '')
-      if (isProtectedDeletePath(normalized) && !CONTENT_ONLY_DIRS.has(normalized)) {
-        prepErrors.push(`Protected path cannot be deleted: ${normalized}`)
-        continue
-      }
-      if (!CONTENT_ONLY_DIRS.has(normalized)) {
-        expandedTargets.push(originalPath)
-        continue
-      }
-
-      try {
-        const children = await readdir(normalized)
-        for (const child of children) {
-          expandedTargets.push(path.join(normalized, child))
-        }
-      } catch (err) {
-        prepErrors.push(`Failed to access ${normalized}: ${String(err)}`)
-      }
+    const requestedPaths = Array.isArray(paths)
+      ? paths.filter((itemPath): itemPath is string => typeof itemPath === 'string' && itemPath.length > 0)
+      : []
+    if (deletionInProgress) {
+      const message = 'Another deletion is already in progress.'
+      return {
+        items: requestedPaths.map((requestedPath) => ({
+          requestedPath,
+          status: 'skipped',
+          movedToTrash: false,
+          reclaimedBytes: 0,
+          movedToTrashBytes: 0,
+          operations: [],
+          error: message,
+        })),
+        requestedCount: requestedPaths.length,
+        successfulCount: 0,
+        failedCount: 0,
+        quotaUsed: 0,
+        reclaimedBytes: 0,
+        movedToTrashBytes: 0,
+        error: message,
+      } satisfies DeleteBatchResult
     }
 
-    // Deduplicate exact duplicates while preserving order
-    const seen = new Set<string>()
-    const deduped: string[] = []
-    for (const targetPath of expandedTargets) {
-      if (seen.has(targetPath)) continue
-      seen.add(targetPath)
-      deduped.push(targetPath)
-    }
-
-    // Remove paths whose ancestor is also in the list — deleting the parent
-    // already removes them, so trying to delete them separately causes "doesn't exist" errors.
-    const effectivePaths = deduped.filter(p =>
-      !deduped.some(other => other !== p && p.startsWith(other.endsWith('/') ? other : other + path.sep))
-    )
-
-    const requested = Math.max(0, effectivePaths.length)
+    deletionInProgress = true
+    try {
     const premium = getLicenseInfo().active
+    const settingsAtStart = loadSettings()
+    const monthKey = currentMonthKey()
+    const usedAtStart = settingsAtStart.deleteQuota.monthKey === monthKey ? settingsAtStart.deleteQuota.used : 0
+    const result = await deleteRequestedPaths(requestedPaths, {
+      deleteImmediately: settingsAtStart.deleteImmediately === true,
+      premium,
+      remainingQuota: Math.max(0, FREE_DELETE_LIMIT_PER_MONTH - usedAtStart),
+      onProgress: (progress) => {
+        if (!_event.sender.isDestroyed()) _event.sender.send('trash-progress', progress)
+      },
+    })
 
-    if (!premium) {
-      const settingsAtStart = loadSettings()
-      const monthKey = currentMonthKey()
-      const usedAtStart = settingsAtStart.deleteQuota.monthKey === monthKey ? settingsAtStart.deleteQuota.used : 0
-      const remaining = Math.max(0, FREE_DELETE_LIMIT_PER_MONTH - usedAtStart)
-
-      if (remaining <= 0) {
-        return `You've reached your free delete limit (${FREE_DELETE_LIMIT_PER_MONTH} per month). Upgrade to Premium for unlimited in-app deletes.`
-      }
-      if (requested > remaining) {
-        return `You can delete ${remaining} more ${remaining === 1 ? 'item' : 'items'} this month on Free. Remove fewer items or upgrade to Premium for unlimited deletes.`
-      }
-    }
-
-    const errors: string[] = []
-    let deletedCount = 0
-    for (const p of effectivePaths) {
-      try {
-        const normalizedPath = p.replace(/\/+$/, '')
-        const isAlreadyInTrash =
-          normalizedPath === userTrash || normalizedPath.startsWith(userTrash + path.sep)
-
-        // Mixed selections are handled per-item:
-        // - items already in Trash are always removed permanently
-        // - everything else follows the user's deleteImmediately preference
-        if (deleteImmediately || isAlreadyInTrash) {
-          await rm(p, { recursive: true, force: false })
-        } else {
-          await shell.trashItem(p)
-        }
-        deletedCount += 1
-        _event.sender.send('trash-progress', { path: p, success: true })
-      } catch (err) {
-        const msg = String(err)
-        // File already gone (trashed on a previous attempt) — treat as success.
-        if (msg.includes("doesn't exist") || msg.includes('does not exist') || msg.includes('ENOENT')) {
-          deletedCount += 1
-          _event.sender.send('trash-progress', { path: p, success: true })
-        } else {
-          errors.push(msg)
-          _event.sender.send('trash-progress', { path: p, success: false, error: msg })
-        }
-      }
-    }
-
-    if (!premium && deletedCount > 0) {
+    if (!premium && result.quotaUsed > 0) {
       const settings = loadSettings()
-      const monthKey = currentMonthKey()
       const used = settings.deleteQuota.monthKey === monthKey ? settings.deleteQuota.used : 0
       patchSettings({
         deleteQuota: {
           monthKey,
-          used: Math.min(FREE_DELETE_LIMIT_PER_MONTH, used + deletedCount),
+          used: Math.min(FREE_DELETE_LIMIT_PER_MONTH, used + result.quotaUsed),
         }
       })
     }
-
-    const allErrors = [...prepErrors, ...errors]
-    return allErrors.length === 0 ? null : allErrors.join('\n')
+    return result
+    } finally {
+      deletionInProgress = false
+    }
   })
 
-  ipcMain.handle('get-item-stats', async (_event, filePath: string) => {
+  ipcMain.handle('get-item-stats', async (_event, filePath: unknown) => {
+    if (!isValidIpcPath(filePath)) return { error: 'Invalid file path.' }
     try {
       const s = await stat(filePath)
       return {
@@ -1058,43 +1147,19 @@ export function registerIpcHandlers(): void {
   // ── App leftover detection ────────────────────────────────────────────────
 
   ipcMain.handle('find-app-leftovers', async () => {
-    const home = os.homedir()
-
-    // Minimum size to report (1 MB = 1024 KB)
-    const MIN_SIZE_KB = 1024
-
-    const installedIds = await getInstalledAppIdentifiers()
-
-    const allResults = await Promise.all(
-      LEFTOVER_LOCATIONS.map((rel) => {
-        const fullPath = path.join(home, rel)
-        const label = rel.split(path.sep).pop() ?? rel
-        return findLeftoversInDir(fullPath, label, installedIds, MIN_SIZE_KB)
+    if (!leftoverScanInFlight) {
+      leftoverScanInFlight = findAppLeftovers().finally(() => {
+        leftoverScanInFlight = null
       })
-    )
-
-    const flat = allResults.flat()
-    // Deduplicate by path and sort largest first
-    const seen = new Set<string>()
-    const unique: AppLeftover[] = []
-    for (const item of flat.sort((a, b) => b.sizeKB - a.sizeKB)) {
-      if (!seen.has(item.path)) {
-        seen.add(item.path)
-        unique.push(item)
-      }
     }
-    return unique
+    return leftoverScanInFlight
   })
 
   // ── AI Analysis (Cloud or Ollama) ─────────────────────────────────────────
 
-  // OpenAI config — set VITE_OPENAI_API_KEY in .env to enable cloud mode.
-  const _aiEnv = (import.meta as unknown as { env: Record<string, string> }).env
-  const OPENAI_API_KEY = _aiEnv.VITE_OPENAI_API_KEY ?? ''
-
-  // Stored prompt template ID on OpenAI (model + system prompt configured there)
-  const OPENAI_PROMPT_ID      = _aiEnv.VITE_OPENAI_PROMPT_ID ?? ''
-  const OPENAI_PROMPT_VERSION = _aiEnv.VITE_OPENAI_PROMPT_VERSION ?? '1'
+  // Cloud AI is an internal/runtime-configured capability. Credentials must
+  // never use VITE_* variables because those are embedded in packaged output.
+  const cloudAiConfig = getCloudAiConfig()
 
   /** Stream an OpenAI Responses API SSE response and emit ollama-token / ollama-done events. */
   async function streamResponsesAPI(
@@ -1212,26 +1277,34 @@ What is this item and is it safe to delete?`
   ipcMain.on(
     'ollama-start',
     async (event, payload: { path: string; name: string; isDir: boolean; sizeKB: number }) => {
-      // Cancel any in-progress request
-      if (ollamaAbort) {
-        ollamaUserCancelled = true
-        ollamaAbort.abort()
-        ollamaAbort = null
+      if (!getLicenseInfo().active) {
+        if (!event.sender.isDestroyed()) event.sender.send('ollama-done', 'A paid license is required for AI analysis.')
+        return
       }
-      ollamaUserCancelled = false
-      ollamaAbort = new AbortController()
+      if (!payload || typeof payload.path !== 'string' || payload.path.length === 0 || payload.path.length > 4096 ||
+          typeof payload.name !== 'string' || payload.name.length === 0 || payload.name.length > 512 ||
+          typeof payload.isDir !== 'boolean' || !Number.isFinite(payload.sizeKB) || payload.sizeKB < 0) {
+        if (!event.sender.isDestroyed()) event.sender.send('ollama-done', 'The selected item could not be analyzed.')
+        return
+      }
+
+      // Cancel any in-progress request
+      ollamaAbort?.abort()
+      const requestSequence = ++ollamaRequestSequence
+      const controller = new AbortController()
+      ollamaAbort = controller
 
       const send = (channel: string, data: unknown) => {
-        if (!event.sender.isDestroyed()) event.sender.send(channel, data)
+        if (requestSequence === ollamaRequestSequence && !event.sender.isDestroyed()) event.sender.send(channel, data)
       }
 
       try {
-        const aiMode = loadSettings().aiMode ?? 'cloud'
+        const aiMode = normalizeAiMode(loadSettings().aiMode)
 
         if (aiMode === 'cloud') {
           // ── OpenAI Responses API (stored prompt template) ──────────────────
-          if (!OPENAI_API_KEY) {
-            throw new Error('Cloud AI is not configured. Set VITE_OPENAI_API_KEY in your .env file.')
+          if (!cloudAiConfig) {
+            throw new Error('Cloud AI is not available. Choose Local AI in Settings.')
           }
 
           send('ollama-model', 'Cloud AI')
@@ -1240,13 +1313,13 @@ What is this item and is it safe to delete?`
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${OPENAI_API_KEY}`,
+              'Authorization': `Bearer ${cloudAiConfig.apiKey}`,
             },
             body: JSON.stringify({
               stream: true,
               prompt: {
-                id:      OPENAI_PROMPT_ID,
-                version: OPENAI_PROMPT_VERSION,
+                id:      cloudAiConfig.promptId,
+                version: cloudAiConfig.promptVersion,
                 variables: {
                   name:         payload.name,
                   path:         payload.path,
@@ -1256,7 +1329,7 @@ What is this item and is it safe to delete?`
                 },
               },
             }),
-            signal: ollamaAbort.signal
+            signal: controller.signal
           })
 
           if (!res.ok || !res.body) {
@@ -1268,7 +1341,7 @@ What is this item and is it safe to delete?`
           // ── Ollama (local) path ────────────────────────────────────────────
           const prompt = buildAnalysisPrompt(payload)
           const model = await pickOllamaModel()
-          if (ollamaUserCancelled) return
+          if (requestSequence !== ollamaRequestSequence) return
 
           send('ollama-model', model)
 
@@ -1276,68 +1349,74 @@ What is this item and is it safe to delete?`
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model, prompt: `${AI_SYSTEM_PROMPT}\n\n${prompt}`, stream: true }),
-            signal: ollamaAbort.signal
+            signal: controller.signal
           })
 
           if (!res.ok || !res.body) throw new Error(`Ollama returned ${res.status}`)
           await streamNdjson(res.body, send)
         }
       } catch (err: unknown) {
-        if (ollamaUserCancelled) return
+        if (requestSequence !== ollamaRequestSequence || controller.signal.aborted) return
         const msg = err instanceof Error ? err.message : String(err)
         send('ollama-done', msg)
       } finally {
-        ollamaAbort = null
+        if (ollamaAbort === controller) ollamaAbort = null
       }
     }
   )
 
   ipcMain.on('ollama-cancel', () => {
     if (ollamaAbort) {
-      ollamaUserCancelled = true
+      ollamaRequestSequence += 1
       ollamaAbort.abort()
       ollamaAbort = null
     }
   })
 
-  ipcMain.handle('get-ai-mode', () => loadSettings().aiMode ?? 'cloud')
-  ipcMain.on('set-ai-mode', (_event, mode: 'cloud' | 'ollama') => {
-    patchSettings({ aiMode: mode })
+  ipcMain.handle('get-ai-capabilities', () => getAiCapabilities())
+  ipcMain.handle('get-ai-mode', () => normalizeAiMode(loadSettings().aiMode))
+  ipcMain.handle('set-ai-mode', (_event, mode: unknown) => {
+    const normalizedMode = normalizeAiMode(mode)
+    patchSettings({ aiMode: normalizedMode })
+    return normalizedMode
   })
 
   // ── Settings ───────────────────────────────────────────────────────────────
   ipcMain.handle('get-settings', () => loadSettings())
   ipcMain.handle('get-platform-info', () => getPlatformMeta())
+  ipcMain.handle('appearance:get', () => getPlatformAppearance(true))
   ipcMain.handle('get-home-dir', () => os.homedir())
   ipcMain.handle('get-app-version', () => app.getVersion())
   ipcMain.handle('get-app-arch', () => process.arch)
 
-  ipcMain.handle('save-settings', (_event, settings: NerionSettings) => {
+  ipcMain.handle('save-settings', (_event, settings: unknown) => {
     const prev = loadSettings()
+    const premium = getLicenseInfo().active
     // Keep runtime-managed counters from the source of truth in main process,
     // so stale renderer state can't overwrite delete quota or scan history.
+    const validatedSettings = normalizeRendererSettings(settings, prev, {
+      premium,
+      allowedQuickFolderPresets: new Set(getPlatformMeta().quickScanOptions.map((option) => option.name)),
+    })
     const mergedSettings: NerionSettings = {
-      ...settings,
-      lastManualScanTime: prev.lastManualScanTime,
-      lastManualScanFoundKB: prev.lastManualScanFoundKB,
-      lastCleanedTime: prev.lastCleanedTime,
-      lastCleanedKB: prev.lastCleanedKB,
-      lastAutoUpdateCheckTime: prev.lastAutoUpdateCheckTime,
-      deleteQuota: prev.deleteQuota,
+      ...validatedSettings,
+      aiMode: normalizeAiMode(validatedSettings.aiMode),
     }
     saveSettings(mergedSettings)
-    if (settings.backgroundScan.enabled !== prev.backgroundScan.enabled ||
-        settings.backgroundScan.intervalHours !== prev.backgroundScan.intervalHours) {
-      if (settings.backgroundScan.enabled) scheduleBackgroundScan()
+    if (mergedSettings.backgroundScan.enabled !== prev.backgroundScan.enabled ||
+        mergedSettings.backgroundScan.intervalHours !== prev.backgroundScan.intervalHours ||
+        mergedSettings.backgroundScan.scanTimeHour !== prev.backgroundScan.scanTimeHour) {
+      if (mergedSettings.backgroundScan.enabled) scheduleBackgroundScan()
       else stopBackgroundScan()
     }
-    if (settings.showMenuBarIcon !== prev.showMenuBarIcon) {
-      setTrayVisibility(settings.showMenuBarIcon)
+    if (mergedSettings.showMenuBarIcon !== prev.showMenuBarIcon) {
+      setTrayVisibility(mergedSettings.showMenuBarIcon)
     }
-    if (settings.autoUpdateEnabled && !prev.autoUpdateEnabled) {
+    if (mergedSettings.autoUpdateEnabled && !prev.autoUpdateEnabled) {
       runAutoUpdateCheck('settings-enabled').catch(() => {})
     }
     rebuildTrayMenu()
+    return mergedSettings
   })
 
   ipcMain.handle('test-notification', () => testNotification())
@@ -1368,11 +1447,14 @@ What is this item and is it safe to delete?`
   })
 
   ipcMain.handle('get-login-item', () => {
-    return app.getLoginItemSettings().openAtLogin
+    return app.getLoginItemSettings(process.platform === 'win32' ? { args: ['--hidden'] } : {}).openAtLogin
   })
 
-  ipcMain.handle('set-login-item', (_event, enable: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: enable, openAsHidden: enable })
+  ipcMain.handle('set-login-item', (_event, enable: unknown) => {
+    if (typeof enable !== 'boolean') throw new Error('Invalid startup setting.')
+    app.setLoginItemSettings(process.platform === 'win32'
+      ? { openAtLogin: enable, args: ['--hidden'] }
+      : { openAtLogin: enable, openAsHidden: enable })
   })
 
   ipcMain.handle('check-full-disk-access', async () => {
@@ -1388,6 +1470,7 @@ What is this item and is it safe to delete?`
   })
 
   ipcMain.handle('relaunch-app', () => {
+    setQuitting()
     app.relaunch()
     app.exit(0)
   })
@@ -1431,11 +1514,21 @@ What is this item and is it safe to delete?`
   })
 
   ipcMain.on('pull-model', async (event, modelName: string) => {
-    if (pullAbort) { pullAbort.abort(); pullAbort = null }
-    pullAbort = new AbortController()
+    if (!getLicenseInfo().active) {
+      if (!event.sender.isDestroyed()) event.sender.send('pull-done', { model: modelName, error: 'A paid license is required to download AI models.' })
+      return
+    }
+    if (typeof modelName !== 'string' || !/^[A-Za-z0-9._:/-]{1,128}$/.test(modelName)) {
+      if (!event.sender.isDestroyed()) event.sender.send('pull-done', { model: String(modelName), error: 'Invalid model name.' })
+      return
+    }
+    if (pullAbort) pullAbort.abort()
+    const requestSequence = ++pullRequestSequence
+    const controller = new AbortController()
+    pullAbort = controller
 
     const send = (channel: string, data: unknown) => {
-      if (!event.sender.isDestroyed()) event.sender.send(channel, data)
+      if (requestSequence === pullRequestSequence && !event.sender.isDestroyed()) event.sender.send(channel, data)
     }
 
     const layerProgress = new Map<string, { total: number; completed: number }>()
@@ -1445,7 +1538,7 @@ What is this item and is it safe to delete?`
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: modelName, stream: true }),
-        signal: pullAbort.signal
+        signal: controller.signal
       })
 
       if (!res.ok || !res.body) {
@@ -1456,33 +1549,39 @@ What is this item and is it safe to delete?`
       const reader = res.body.getReader()
       const dec = new TextDecoder()
       let buf = ''
+      let explicitSuccess = false
+
+      const consumePullLine = (line: string): boolean => {
+        const obj = parseOllamaPullRecord(line)
+        if (!obj) return false
+        if (obj.error) throw new Error(obj.error)
+        if (obj.digest && obj.total) {
+          layerProgress.set(obj.digest, { total: obj.total, completed: obj.completed })
+        }
+        const totalBytes = [...layerProgress.values()].reduce((s, v) => s + v.total, 0)
+        const completedBytes = [...layerProgress.values()].reduce((s, v) => s + v.completed, 0)
+        const progress = totalBytes > 0 ? Math.round((completedBytes / totalBytes) * 100) : null
+        send('pull-progress', { model: modelName, progress, status: obj.status })
+        return obj.status === 'success'
+      }
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
         buf += dec.decode(value, { stream: true })
+        if (buf.length > 1_048_576) throw new Error('Ollama returned an invalid oversized response.')
         const lines = buf.split('\n')
         buf = lines.pop() ?? ''
         for (const line of lines) {
-          if (!line.trim()) continue
-          try {
-            const obj = JSON.parse(line) as {
-              status?: string; digest?: string; total?: number; completed?: number
-            }
-            if (obj.digest && obj.total) {
-              layerProgress.set(obj.digest, { total: obj.total, completed: obj.completed ?? 0 })
-            }
-            const totalBytes = [...layerProgress.values()].reduce((s, v) => s + v.total, 0)
-            const completedBytes = [...layerProgress.values()].reduce((s, v) => s + v.completed, 0)
-            const progress = totalBytes > 0 ? Math.round((completedBytes / totalBytes) * 100) : null
-            send('pull-progress', { model: modelName, progress, status: obj.status ?? '' })
-            if (obj.status === 'success') {
-              send('pull-done', { model: modelName, error: null })
-              return
-            }
-          } catch { /* malformed line */ }
+          if (consumePullLine(line)) {
+            explicitSuccess = true
+            break
+          }
         }
+        if (explicitSuccess) break
       }
+      if (!explicitSuccess && buf.trim()) explicitSuccess = consumePullLine(buf)
+      if (!explicitSuccess) throw new Error('The Ollama download stream ended before the model was ready.')
       send('pull-done', { model: modelName, error: null })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -1490,32 +1589,40 @@ What is this item and is it safe to delete?`
         send('pull-done', { model: modelName, error: msg })
       }
     } finally {
-      pullAbort = null
+      if (pullAbort === controller) pullAbort = null
     }
   })
 
   ipcMain.on('cancel-pull', () => {
+    pullRequestSequence += 1
     if (pullAbort) { pullAbort.abort(); pullAbort = null }
   })
 
   // ── License ────────────────────────────────────────────────────────────────
   ipcMain.handle('license:get', () => getLicenseInfo())
-  ipcMain.handle('license:activate', (_event, key: string) => activateLicense(key))
+  ipcMain.handle('license:activate', (_event, key: unknown) => {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 512) {
+      return { ok: false, error: 'Enter a valid license key.' }
+    }
+    return activateLicense(key)
+  })
   ipcMain.handle('license:deactivate', () => deactivateLicense())
 
-  // Silently re-validate on startup — updates cached status without blocking
-  revalidateLicense().catch(() => {})
+  // Single-flight startup + recurring entitlement refresh service.
+  startLicenseValidationService()
 
   ipcMain.handle('run-bg-scan', () => runBackgroundScan())
 
-  ipcMain.on('update-last-scan-path', (_event, scanPath: string) => {
-    updateLastScanPath(scanPath)
+  ipcMain.on('update-last-scan-path', (_event, scanPath: unknown) => {
+    if (isValidIpcPath(scanPath)) updateLastScanPath(scanPath)
   })
 
-  ipcMain.on('notify-manual-scan-done', (_event, foundKB: number) => {
+  ipcMain.on('notify-manual-scan-done', (_event, foundKB: unknown) => {
+    const normalizedFoundKB = normalizeNonNegativeKilobytes(foundKB)
+    if (normalizedFoundKB === null) return
     patchSettings({
       lastManualScanTime: Date.now(),
-      lastManualScanFoundKB: foundKB,
+      lastManualScanFoundKB: normalizedFoundKB,
       // Reset cleaned state so tray shows "Found" for the new scan
       lastCleanedTime: null,
       lastCleanedKB: 0
@@ -1523,8 +1630,10 @@ What is this item and is it safe to delete?`
     rebuildTrayMenu()
   })
 
-  ipcMain.on('notify-cleaned', (_event, cleanedKB: number) => {
-    patchSettings({ lastCleanedTime: Date.now(), lastCleanedKB: cleanedKB })
+  ipcMain.on('notify-cleaned', (_event, cleanedKB: unknown) => {
+    const normalizedCleanedKB = normalizeNonNegativeKilobytes(cleanedKB)
+    if (normalizedCleanedKB === null) return
+    patchSettings({ lastCleanedTime: Date.now(), lastCleanedKB: normalizedCleanedKB })
     rebuildTrayMenu()
   })
 }

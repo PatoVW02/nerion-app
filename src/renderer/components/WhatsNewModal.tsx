@@ -1,7 +1,21 @@
-import React, { useEffect, useState } from 'react'
+import { useEffect, useState, type ComponentType } from 'react'
 import { createPortal } from 'react-dom'
-import * as LucideIcons from 'lucide-react'
-import { type LucideProps } from 'lucide-react'
+import {
+  AlertTriangle,
+  Clock,
+  Cloud,
+  Download,
+  Folder,
+  ListChecks,
+  Monitor,
+  PackageSearch,
+  Shield,
+  ShieldCheck,
+  Sparkles,
+  Trash,
+  Zap,
+  type LucideProps,
+} from 'lucide-react'
 import changelog from '../whats-new.json'
 
 interface ReleaseItem {
@@ -23,18 +37,36 @@ interface WhatsNewModalProps {
 }
 
 /** Returns the release matching the given version, or the latest if not found. */
-function getRelease(version?: string): Release | null {
+export function getRelease(version?: string): Release | null {
   const releases = changelog.releases as Release[]
   if (version) {
     const match = releases.find((r) => r.version === version)
     if (match) return match
   }
-  return null
+  return releases[0] ?? null
 }
 
-/** Resolve a Lucide icon name string to its component, falling back to a dot. */
+// Keep this list explicit. Importing the Lucide namespace pulls every icon into
+// the renderer bundle just to resolve a handful of changelog names at runtime.
+const RELEASE_ICONS: Record<string, ComponentType<LucideProps>> = {
+  AlertTriangle,
+  Clock,
+  Cloud,
+  Download,
+  Folder,
+  ListChecks,
+  Monitor,
+  PackageSearch,
+  Shield,
+  ShieldCheck,
+  Sparkles,
+  Trash,
+  Zap,
+}
+
+/** Resolve a supported icon name, falling back to a dot for malformed data. */
 function ReleaseIcon({ name, className }: { name: string; className?: string }) {
-  const Icon = (LucideIcons as unknown as Record<string, React.ComponentType<LucideProps>>)[name]
+  const Icon = RELEASE_ICONS[name]
   if (!Icon) return <span className={className}>·</span>
   return <Icon size={16} className={className} strokeWidth={1.75} />
 }
@@ -58,6 +90,9 @@ export function WhatsNewModal({ version, onClose }: WhatsNewModalProps) {
 
   return createPortal(
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="whats-new-title"
       className={[
         'fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-6',
         'transition-opacity duration-200 ease-out',
@@ -72,7 +107,7 @@ export function WhatsNewModal({ version, onClose }: WhatsNewModalProps) {
       >
         <div
           className={[
-            'w-full bg-zinc-900/80 backdrop-blur-2xl border border-white/[0.12] rounded-2xl shadow-2xl',
+            'glass-popover w-full border rounded-2xl',
             'flex flex-col max-h-[min(620px,calc(100vh-3rem))]',
             'transition-all duration-200 ease-out',
             entered ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[0.98]',
@@ -82,10 +117,10 @@ export function WhatsNewModal({ version, onClose }: WhatsNewModalProps) {
           <div className="shrink-0 px-8 pt-8 pb-6 border-b border-white/5">
             <div className="flex items-center gap-3">
               <div className="w-9 h-9 rounded-xl bg-blue-600/15 border border-blue-500/20 flex items-center justify-center shrink-0">
-                <LucideIcons.Sparkles className='text-blue-400' width={16} height={16} />
+                <Sparkles className="text-blue-400" width={16} height={16} />
               </div>
               <div>
-                <h2 className="text-base font-semibold text-zinc-100 leading-tight">
+                <h2 id="whats-new-title" className="text-base font-semibold text-zinc-100 leading-tight">
                   What's New in Nerion {release.version}
                 </h2>
                 <p className="text-xs text-zinc-500 mt-0.5">{release.date}</p>

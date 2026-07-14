@@ -6,37 +6,11 @@ import { loadSettings, patchSettings } from './settings'
 import * as os from 'os'
 import { getDefaultQuickScanFolders, isCleanable as sharedIsCleanable, isDevDependency as sharedIsDevDependency, resolveQuickFolderPath } from '../shared/policy'
 import { getAppPlatform } from './platform'
+import { collapseOverlappingPaths, isSameOrDescendantPath, pathComparisonKey } from '../shared/path-utils'
+import { getLicenseInfo } from './license'
+import type { ScanSummaryV1 } from '../shared/contracts'
+import { planBackgroundTimer, summarizeBackgroundScan } from './runtime-policy'
 
-const CLEANABLE_NAMES = new Set(['.cache', '.tmp', 'tmp', 'temp', '.temp', 'logs', 'deriveddata'])
-const DEV_DEPENDENCY_NAMES = new Set([
-  'node_modules',
-  'venv', '.venv', 'env', '__pycache__', '.tox',
-  '.m2',
-  '.gradle',
-  'vendor',
-  'target',
-  '.build',
-  'pods',
-  '.stack-work',
-  'bower_components',
-])
-const SYSTEM_PATH_PREFIXES = ['/opt/', '/usr/', '/System/', '/Library/', '/Applications/', '/Developer/', '/private/', '/bin/', '/sbin/']
-const MANAGED_PATH_SUBSTRINGS = [
-  '/.nvm/',
-  '/.vscode/',
-  '/.rbenv/',
-  '/.pyenv/',
-  '/.asdf/',
-  '/homebrew/',
-  '.app/Contents/',
-  '/ShipIt/',
-  '/.npm/',
-  '/.copilot/',
-  '/go/pkg/',
-  '/Application Support/',
-  '/Library/Python/',
-  '/Library/Containers/',
-]
 function isCleanableEntry(e: DiskEntry): boolean {
   return sharedIsCleanable(e, getAppPlatform())
 }
@@ -74,6 +48,7 @@ let trayLabelInterval: ReturnType<typeof setInterval> | null = null
 let scanning = false
 let getMainWin: () => BrowserWindow | null = () => null
 let quitting = false
+const activeBackgroundCancels = new Set<() => void>()
 
 export function setQuitting(): void { quitting = true }
 export function isQuitting(): boolean { return quitting }
@@ -84,18 +59,31 @@ function trayIconPath(): string {
     : join(process.resourcesPath, 'icon.png')
 }
 
-export function initTray(mainWindowGetter: () => BrowserWindow | null): void {
+export function initTray(mainWindowGetter: () => BrowserWindow | null): boolean {
   getMainWin = mainWindowGetter
-  if (!loadSettings().showMenuBarIcon) return
-  createTray()
+  if (!loadSettings().showMenuBarIcon) return false
+  return createTray()
 }
 
-function createTray(): void {
+function createTray(): boolean {
+  if (tray) return true
   try {
     const icon = nativeImage.createFromPath(trayIconPath()).resize({ width: 16, height: 16 })
+    if (icon.isEmpty()) throw new Error('Tray icon could not be loaded.')
+    if (getAppPlatform() === 'macos') icon.setTemplateImage(true)
     tray = new Tray(icon)
     tray.setToolTip('Nerion')
     rebuildTrayMenu()
+
+    if (getAppPlatform() === 'windows') {
+      tray.on('click', () => {
+        const win = getMainWin()
+        if (!win || win.isDestroyed()) return
+        if (win.isMinimized()) win.restore()
+        win.show()
+        win.focus()
+      })
+    }
 
     // Rebuild every minute so "X ago" labels stay accurate.
     // The menu is cached by macOS after setContextMenu(), so without this the
@@ -104,8 +92,11 @@ function createTray(): void {
     trayLabelInterval = setInterval(() => {
       if (tray) rebuildTrayMenu()
     }, 60_000)
+    return true
   } catch {
     // icon missing in dev — skip tray
+    tray = null
+    return false
   }
 }
 
@@ -117,6 +108,10 @@ export function setTrayVisibility(show: boolean): void {
     tray = null
     if (trayLabelInterval) { clearInterval(trayLabelInterval); trayLabelInterval = null }
   }
+}
+
+export function isTrayAvailable(): boolean {
+  return tray !== null && !tray.isDestroyed()
 }
 
 export function testNotification(): void {
@@ -146,6 +141,7 @@ export function rebuildTrayMenu(): void {
   // those results are stale relative to what the user just scanned.
   const manualScanIsNewer = manualTs > bgTs
   const hasResults = bg.lastScanResults.length > 0 && !manualScanIsNewer
+  const backgroundScanIncomplete = bg.lastScanComplete === false && !manualScanIsNewer
 
   const items: Electron.MenuItemConstructorOptions[] = [
     { label: 'Nerion', enabled: false },
@@ -173,9 +169,11 @@ export function rebuildTrayMenu(): void {
     })
   } else if (bg.lastScanTime) {
     items.push({
-      label: hasResults
-        ? `Last scan ${timeAgo(bg.lastScanTime)} · Found ${fmtKB(bgTotalKB)}`
-        : `Last scan ${timeAgo(bg.lastScanTime)} · Nothing found`,
+      label: backgroundScanIncomplete
+        ? `Last scan ${timeAgo(bg.lastScanTime)} · Incomplete${bg.lastScanIssueCount > 0 ? ` (${bg.lastScanIssueCount} issues)` : ''}`
+        : hasResults
+          ? `Last scan ${timeAgo(bg.lastScanTime)} · Found ${fmtKB(bgTotalKB)}`
+          : `Last scan ${timeAgo(bg.lastScanTime)} · Nothing found`,
       enabled: false
     })
   }
@@ -232,25 +230,65 @@ export function rebuildTrayMenu(): void {
   tray.setContextMenu(Menu.buildFromTemplate(items))
 }
 
-function scanFolder(dirPath: string): Promise<DiskEntry[]> {
+function scanFolder(
+  dirPath: string,
+  seenHardlinks: Set<string>,
+): Promise<{ entries: DiskEntry[]; summary: ScanSummaryV1 }> {
   return new Promise((resolve) => {
     const entries: DiskEntry[] = []
-    scanDirectoryStreaming(
+    const duplicateBytes: Array<{ path: string; bytes: number }> = []
+    const currentPlatform = getAppPlatform()
+    const scanId = `background-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    let cancelScan = (): void => {}
+    cancelScan = scanDirectoryStreaming(
       dirPath,
-      (e) => entries.push(e),
-      () => resolve(entries),
-      { lowPriority: true }
+      { scanId, rootId: 'root-0', lowPriority: true },
+      (event) => {
+        if (event.event !== 'entry') return
+        if (!event.isDir && event.device && event.inode) {
+          const identity = `${event.device}:${event.inode}`
+          if (seenHardlinks.has(identity) && !event.hardlinkDuplicate) {
+            duplicateBytes.push({ path: event.path, bytes: event.allocatedBytes })
+            entries.push({ ...event, allocatedBytes: 0, sizeKB: 0, hardlinkDuplicate: true })
+            return
+          }
+          seenHardlinks.add(identity)
+        }
+        if (event.isDir) {
+          const adjustment = duplicateBytes
+            .filter((duplicate) => isSameOrDescendantPath(duplicate.path, event.path, currentPlatform))
+            .reduce((total, duplicate) => total + duplicate.bytes, 0)
+          if (adjustment > 0) {
+            const allocatedBytes = Math.max(0, event.allocatedBytes - adjustment)
+            entries.push({ ...event, allocatedBytes, sizeKB: Math.ceil(allocatedBytes / 1024) })
+            return
+          }
+        }
+        entries.push(event)
+      },
+      ({ summary }) => {
+        activeBackgroundCancels.delete(cancelScan)
+        resolve({ entries, summary })
+      },
     )
+    activeBackgroundCancels.add(cancelScan)
   })
 }
 
 export async function runBackgroundScan(): Promise<void> {
-  if (scanning) return
+  if (scanning || quitting) return
   const settings = loadSettings()
+  if (!getLicenseInfo().active) {
+    if (settings.backgroundScan.enabled) {
+      patchSettings({ backgroundScan: { enabled: false } })
+      rebuildTrayMenu()
+    }
+    return
+  }
   const home = os.homedir()
   const platform = getAppPlatform()
 
-  const folders = settings.quickScanFolders?.length
+  const folders = Array.isArray(settings.quickScanFolders)
     ? settings.quickScanFolders
     : getDefaultQuickScanFolders(platform)
   const allowedPaths = new Set(
@@ -261,12 +299,20 @@ export async function runBackgroundScan(): Promise<void> {
 
   const scanPaths = [...allowedPaths]
 
-  const dedupedScanPaths: string[] = []
-  const seen = new Set<string>()
-  for (const p of scanPaths) {
-    if (seen.has(p)) continue
-    seen.add(p)
-    dedupedScanPaths.push(p)
+  const dedupedScanPaths = collapseOverlappingPaths(scanPaths, platform)
+
+  if (dedupedScanPaths.length === 0) {
+    patchSettings({
+      backgroundScan: {
+        lastScanTime: Date.now(),
+        lastScanResults: [],
+        lastScanComplete: false,
+        lastScanIssueCount: 0,
+        lastScanError: 'No scan locations are selected.',
+      },
+    })
+    rebuildTrayMenu()
+    return
   }
 
   const allowedPrefixes = [...allowedPaths]
@@ -283,18 +329,23 @@ export async function runBackgroundScan(): Promise<void> {
 
   try {
     const allCleanable: DiskEntry[] = []
+    const seenHardlinks = new Set<string>()
+    const rootSummaries: ScanSummaryV1[] = []
 
     for (const scanPath of dedupedScanPaths) {
-      const entries = await scanFolder(scanPath)
+      const { entries, summary } = await scanFolder(scanPath, seenHardlinks)
+      if (quitting) return
+      rootSummaries.push(summary)
       for (const entry of entries) {
         const isDev = isDevDependencyEntry(entry)
         const lastSeparator = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'))
         const parentDir = lastSeparator === -1 ? '' : entry.path.slice(0, lastSeparator)
-        const isDownloadsItem = downloadsParents.has(parentDir) && entry.sizeKB > 0
-        const isTrashItem = trashParents.has(parentDir) && entry.sizeKB > 0
+        const parentKey = pathComparisonKey(parentDir, platform)
+        const isDownloadsItem = [...downloadsParents].some((parent) => pathComparisonKey(parent, platform) === parentKey) && entry.sizeKB > 0
+        const isTrashItem = [...trashParents].some((parent) => pathComparisonKey(parent, platform) === parentKey) && entry.sizeKB > 0
 
         if (!isDev && !isDownloadsItem && !isTrashItem) {
-          const inAllowedPath = allowedPrefixes.some(p => entry.path === p || entry.path.startsWith(`${p}${entry.path.includes('\\') ? '\\' : '/'}`))
+          const inAllowedPath = allowedPrefixes.some((p) => isSameOrDescendantPath(entry.path, p, platform))
           if (!inAllowedPath) continue
         }
 
@@ -305,15 +356,39 @@ export async function runBackgroundScan(): Promise<void> {
     }
 
     const totalKB = allCleanable.reduce((s, e) => s + e.sizeKB, 0)
+    const outcome = summarizeBackgroundScan(rootSummaries, dedupedScanPaths.length)
 
     patchSettings({
       backgroundScan: {
         lastScanTime: Date.now(),
-        lastScanResults: allCleanable.map(e => ({ path: e.path, name: e.name, sizeKB: e.sizeKB, isDir: e.isDir }))
+        lastScanResults: allCleanable.map(e => ({ path: e.path, name: e.name, sizeKB: e.sizeKB, isDir: e.isDir })),
+        lastScanComplete: outcome.complete,
+        lastScanIssueCount: outcome.issueCount,
+        lastScanError: outcome.error,
       }
     })
 
-    if (allCleanable.length > 0) {
+    if (!outcome.complete) {
+      if (Notification.isSupported()) {
+        const note = new Notification({
+          title: 'Nerion — Scan Incomplete',
+          body: outcome.issueCount > 0
+            ? `${outcome.issueCount} scan ${outcome.issueCount === 1 ? 'issue was' : 'issues were'} reported. Open Nerion to review partial results.`
+            : (outcome.error ?? 'Some locations could not be scanned.'),
+        })
+        note.on('click', () => {
+          const win = getMainWin()
+          if (!win || win.isDestroyed()) return
+          win.show(); win.focus()
+          if (allCleanable.length > 0) {
+            win.webContents.send('bg-clean-requested', allCleanable.map(e => ({
+              path: e.path, name: e.name, sizeKB: e.sizeKB, isDir: e.isDir
+            })))
+          }
+        })
+        note.show()
+      }
+    } else if (allCleanable.length > 0 && Notification.isSupported()) {
       const note = new Notification({
         title: 'Nerion — Scan Complete',
         body: `Found ${fmtKB(totalKB)} you can clean up. Click to review.`
@@ -330,6 +405,15 @@ export async function runBackgroundScan(): Promise<void> {
     }
   } catch (err) {
     console.error('[Nerion] Background scan error:', err)
+    patchSettings({
+      backgroundScan: {
+        lastScanTime: Date.now(),
+        lastScanResults: [],
+        lastScanComplete: false,
+        lastScanIssueCount: 0,
+        lastScanError: err instanceof Error ? err.message : 'The background scan failed unexpectedly.',
+      },
+    })
   } finally {
     scanning = false
     rebuildTrayMenu()
@@ -358,12 +442,16 @@ function nextScanDelay(bg: ReturnType<typeof loadSettings>['backgroundScan']): n
 
 function scheduleNext(): void {
   const { backgroundScan: bg } = loadSettings()
-  if (!bg.enabled) return
-  const delay = nextScanDelay(bg)
+  if (!bg.enabled || !getLicenseInfo().active) return
+  const timerPlan = planBackgroundTimer(nextScanDelay(bg))
   bgTimeout = setTimeout(async () => {
+    if (!timerPlan.scanWhenFired) {
+      scheduleNext()
+      return
+    }
     await runBackgroundScan()
     scheduleNext()
-  }, delay)
+  }, timerPlan.delayMs)
 }
 
 export function scheduleBackgroundScan(): void {
@@ -377,6 +465,18 @@ export function stopBackgroundScan(): void {
 
 function clearSchedule(): void {
   if (bgTimeout) { clearTimeout(bgTimeout); bgTimeout = null }
+}
+
+export function disposeBackgroundServices(): void {
+  clearSchedule()
+  for (const cancel of activeBackgroundCancels) cancel()
+  activeBackgroundCancels.clear()
+  if (trayLabelInterval) {
+    clearInterval(trayLabelInterval)
+    trayLabelInterval = null
+  }
+  tray?.destroy()
+  tray = null
 }
 
 export function updateLastScanPath(p: string): void {

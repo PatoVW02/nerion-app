@@ -1,6 +1,33 @@
 {
   "releases": [
+    {
+      "version": "1.5.0",
+      "date": "July 2026",
+      "description": "Meet a cleaner, more capable Nerion with local background-item review, smarter app-leftover recommendations, and a new glass interface across macOS and Windows.",
+      "items": [
         {
+          "icon": "ShieldCheck",
+          "title": "Local Security Review",
+          "description": "Paid users can review unfamiliar startup items and high-signal disguised executables alongside a normal file scan. Analysis stays on your device and every finding explains why it deserves a look."
+        },
+        {
+          "icon": "PackageSearch",
+          "title": "Smarter App Leftovers",
+          "description": "Nerion now groups related files from uninstalled apps, includes small leftovers, and separates confident recommendations from items that deserve a manual review."
+        },
+        {
+          "icon": "Sparkles",
+          "title": "A New Glass Interface",
+          "description": "Enjoy a refined translucent design with macOS vibrancy, Windows Mica, clearer panels, and automatic opaque fallbacks for reduced-transparency and high-contrast preferences."
+        },
+        {
+          "icon": "ListChecks",
+          "title": "Clearer Cleanup Review",
+          "description": "Cleanup results now stay tied to the files and folders you selected, with clear moved-to-trash, removed, protected, skipped, and failed outcomes before you move on."
+        }
+      ]
+    },
+    {
       "version": "1.4.7",
       "date": "May 2026",
       "description": "This update improves Windows quick scans when some system folders are harder to read.",

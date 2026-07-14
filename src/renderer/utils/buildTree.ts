@@ -100,7 +100,9 @@ export function buildCleanableTree(
 
     return {
       label: displaySegment(label),
-      path: node.path,
+      // Real entries retain their native path for selection and filesystem IPC.
+      // Synthetic intermediate nodes use the normalized UI path built by the trie.
+      path: node.entry?.path ?? node.path,
       isCleanable: entryIsCleanable,
       entry: node.entry,
       children,

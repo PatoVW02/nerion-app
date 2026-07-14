@@ -13,6 +13,10 @@ export function isCleanable(entry: DiskEntry): boolean {
   return sharedIsCleanable(entry)
 }
 
+export function isCleanableForHome(entry: DiskEntry, homeDir: string | null): boolean {
+  return sharedIsCleanable(entry, undefined, homeDir)
+}
+
 export function isDevDependency(entry: DiskEntry): boolean {
   return sharedIsDevDependency(entry)
 }

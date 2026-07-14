@@ -354,7 +354,7 @@ function fmtDate(iso: string | undefined): string {
   } catch { return '–' }
 }
 
-function SortIcon({ field, active, dir }: { field: string; active: boolean; dir: SortDir }) {
+function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
   if (!active) return (
     <svg className="w-2.5 h-2.5 opacity-25" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M8 9l4-4 4 4M16 15l-4 4-4-4" />
@@ -484,16 +484,28 @@ export function TreemapView({
       flushTimer = null
     }
 
-    Promise.all(
-      entries.map(async (e) => {
-        const stats = await window.electronAPI.getItemStats(e.path)
-        if (cancelled) return
-        if ('created' in stats && stats.created) {
-          batch[e.path] = stats.created
-          if (!flushTimer) flushTimer = setTimeout(flush, 200)
+    let nextIndex = 0
+    const workerCount = Math.min(8, entries.length)
+    const loadNext = async () => {
+      while (!cancelled) {
+        const index = nextIndex++
+        if (index >= entries.length) return
+        const e = entries[index]
+        try {
+          const stats = await window.electronAPI.getItemStats(e.path)
+          if (cancelled) return
+          if ('created' in stats && stats.created) {
+            batch[e.path] = stats.created
+            if (!flushTimer) flushTimer = setTimeout(flush, 200)
+          }
+        } catch {
+          // A disappearing or inaccessible entry should not abort metadata for
+          // every other row in the folder.
         }
-      })
-    ).then(() => {
+      }
+    }
+
+    Promise.all(Array.from({ length: workerCount }, () => loadNext())).then(() => {
       if (flushTimer) clearTimeout(flushTimer)
       flush()
     })
@@ -629,6 +641,7 @@ export function TreemapView({
               </svg>
             )}
           </div>
+
           <button
             onClick={() => handleSortClick('name')}
             className={[
@@ -637,7 +650,7 @@ export function TreemapView({
             ].join(' ')}
           >
             <span>Name</span>
-            <SortIcon field="name" active={sortField === 'name'} dir={sortDir} />
+            <SortIcon active={sortField === 'name'} dir={sortDir} />
           </button>
           <button
             onClick={() => handleSortClick('size')}
@@ -646,7 +659,7 @@ export function TreemapView({
               sortField === 'size' ? 'text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'
             ].join(' ')}
           >
-            <SortIcon field="size" active={sortField === 'size'} dir={sortDir} />
+            <SortIcon active={sortField === 'size'} dir={sortDir} />
             <span>Size</span>
           </button>
           <button
@@ -656,10 +669,16 @@ export function TreemapView({
               sortField === 'created' ? 'text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'
             ].join(' ')}
           >
-            <SortIcon field="created" active={sortField === 'created'} dir={sortDir} />
+            <SortIcon active={sortField === 'created'} dir={sortDir} />
             <span>Created</span>
           </button>
         </div>
+
+        {error && hasEntries && (
+          <div role="status" className="shrink-0 border-b border-amber-500/20 bg-amber-500/[0.08] px-3 py-2 text-[10px] leading-relaxed text-amber-300/90">
+            {error}
+          </div>
+        )}
 
         {/* Rows */}
         <div className="flex-1 overflow-y-auto min-h-0 scrollbar-dark">

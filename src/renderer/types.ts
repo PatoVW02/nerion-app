@@ -1,8 +1,29 @@
+import type {
+  DeleteBatchResult,
+  AiCapabilities,
+  LeftoverGroup,
+  LeftoverScanResult,
+  LicenseSnapshot,
+  PlatformAppearance,
+  ScanEventV1,
+  ScanIssue,
+  ScanSummaryV1,
+  SuspiciousFinding,
+} from '../shared/contracts'
+
+export type { AiCapabilities, DeleteBatchResult, LeftoverGroup, LeftoverScanResult, LicenseSnapshot, PlatformAppearance, ScanEventV1, ScanIssue, ScanSummaryV1, SuspiciousFinding }
+
 export interface DiskEntry {
   name: string
   path: string
   sizeKB: number
   isDir: boolean
+  allocatedBytes?: number
+  scanId?: string
+  rootId?: string
+  device?: string | null
+  inode?: string | null
+  hardlinkDuplicate?: boolean
 }
 
 export type ScanResult =
@@ -15,12 +36,7 @@ export interface ItemStats {
   sizeBytes: number
 }
 
-export interface AppLeftover {
-  path: string
-  name: string
-  sizeKB: number
-  location: string  // e.g. "Application Support", "Caches"
-}
+export type AppLeftover = LeftoverGroup
 
 export interface BackgroundScanSettings {
   enabled: boolean
@@ -29,6 +45,9 @@ export interface BackgroundScanSettings {
   lastScanPath: string | null
   lastScanTime: number | null
   lastScanResults: Array<{ path: string; name: string; sizeKB: number; isDir: boolean }>
+  lastScanComplete: boolean | null
+  lastScanIssueCount: number
+  lastScanError: string | null
 }
 
 export interface OllamaModel {
@@ -46,7 +65,7 @@ export interface NerionSettings {
   preferredOllamaModel: string | null
   onboardingComplete: boolean
   showDevDependencies: boolean
-  /** 'cloud' = OpenAI (default); 'ollama' = local Ollama */
+  /** 'cloud' = runtime-configured OpenAI; 'ollama' = local Ollama */
   aiMode: 'cloud' | 'ollama'
   /** Folder names (relative to ~/Library) included in Quick Scan mode. */
   quickScanFolders: string[]
@@ -62,14 +81,7 @@ export interface NerionSettings {
   }
 }
 
-export interface LicenseInfo {
-  active: boolean
-  licenseType: 'subscription' | 'lifetime' | null
-  maskedKey: string | null
-  customerEmail: string | null
-  expiresAt: string | null
-  lastValidated: string | null
-}
+export type LicenseInfo = LicenseSnapshot
 
 export type UpdaterStatusEvent =
   | { type: 'checking' }
@@ -100,21 +112,20 @@ declare global {
   interface Window {
     electronAPI: {
       // Scanner
-      startScan: (path: string | string[]) => void
+      startScan: (path: string | string[]) => string
       cancelScan: () => void
-      onScanEntry: (cb: (entry: DiskEntry) => void) => void
-      onScanDone: (cb: (error: string | null) => void) => void
+      onScanEvent: (cb: (event: ScanEventV1) => void) => () => void
       removeScanListeners: () => void
 
       // File operations
       openDirectory: () => Promise<string | null>
       revealInFileManager: (path: string) => Promise<void>
-      trashEntries: (paths: string[]) => Promise<string | null>
-      onTrashProgress: (cb: (data: { path: string; success: boolean; error?: string }) => void) => () => void
+      trashEntries: (paths: string[]) => Promise<DeleteBatchResult>
+      onTrashProgress: (cb: (data: { requestedPath: string; path: string; status: import('../shared/contracts').DeleteItemStatus; error?: string }) => void) => () => void
       getItemStats: (path: string) => Promise<ItemStats | { error: string }>
 
       // App leftover detection
-      findAppLeftovers: () => Promise<AppLeftover[]>
+      findAppLeftovers: () => Promise<LeftoverScanResult>
 
       // Ollama AI
       startOllamaAnalysis: (payload: {
@@ -135,6 +146,8 @@ declare global {
       // Settings & background scan
       getSettings: () => Promise<NerionSettings>
       getPlatformInfo: () => Promise<PlatformInfo>
+      getPlatformAppearance: () => Promise<PlatformAppearance>
+      onPlatformAppearanceChanged: (cb: (appearance: PlatformAppearance) => void) => () => void
       getHomeDir: () => Promise<string>
       getAppVersion: () => Promise<string>
       getAppArch: () => Promise<string>
@@ -173,11 +186,13 @@ declare global {
       // License
       getLicense: () => Promise<LicenseInfo>
       activateLicense: (key: string) => Promise<{ ok: true; info: LicenseInfo } | { ok: false; error: string }>
-      deactivateLicense: () => Promise<void>
+      deactivateLicense: () => Promise<LicenseInfo>
+      onLicenseChanged: (cb: (snapshot: LicenseInfo) => void) => () => void
 
       // AI mode
+      getAiCapabilities: () => Promise<AiCapabilities>
       getAiMode: () => Promise<'cloud' | 'ollama'>
-      setAiMode: (mode: 'cloud' | 'ollama') => void
+      setAiMode: (mode: 'cloud' | 'ollama') => Promise<'cloud' | 'ollama'>
     }
   }
 }

@@ -3,6 +3,7 @@ import { app, BrowserWindow, Notification } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import { loadSettings, patchSettings } from './settings'
 import { setQuitting } from './background'
+import { compareUpdaterVersions, detectMachOArch } from './updater-policy'
 
 /**
  * Returns 'universal', 'arm64', or 'x64' by reading the first 8 bytes of the
@@ -15,21 +16,18 @@ import { setQuitting } from './background'
  */
 function detectBuildArch(): 'universal' | 'arm64' | 'x64' {
   if (process.platform === 'darwin') {
+    let fd: number | null = null
     try {
       const buf = Buffer.alloc(8)
-      const fd = openSync(process.execPath, 'r')
-      readSync(fd, buf, 0, 8, 0)
-      closeSync(fd)
-
-      if (buf.readUInt32BE(0) === 0xcafebabe) return 'universal'
-
-      if (buf.readUInt32LE(0) === 0xfeedfacf) {
-        const cpuType = buf.readUInt32LE(4)
-        if (cpuType === 0x0100000c) return 'arm64'
-        if (cpuType === 0x01000007) return 'x64'
-      }
+      fd = openSync(process.execPath, 'r')
+      const bytesRead = readSync(fd, buf, 0, 8, 0)
+      return detectMachOArch(buf.subarray(0, bytesRead), process.arch === 'arm64' ? 'arm64' : 'x64')
     } catch {
       // unreadable — fall through to process.arch
+    } finally {
+      if (fd !== null) {
+        try { closeSync(fd) } catch { /* best-effort descriptor cleanup */ }
+      }
     }
   }
   return process.arch === 'arm64' ? 'arm64' : 'x64'
@@ -90,20 +88,6 @@ function broadcastUpdaterStatus(event: UpdaterStatusEvent): void {
   }
 }
 
-function compareSemver(a: string, b: string): number {
-  const aParts = a.replace(/^v/i, '').split('.').map(n => parseInt(n, 10))
-  const bParts = b.replace(/^v/i, '').split('.').map(n => parseInt(n, 10))
-  const len = Math.max(aParts.length, bParts.length)
-
-  for (let i = 0; i < len; i += 1) {
-    const av = Number.isFinite(aParts[i]) ? aParts[i] : 0
-    const bv = Number.isFinite(bParts[i]) ? bParts[i] : 0
-    if (av > bv) return 1
-    if (av < bv) return -1
-  }
-
-  return 0
-}
 function ensureUpdaterListeners(): void {
   if (listenersRegistered) return
 
@@ -148,17 +132,18 @@ function ensureUpdaterListeners(): void {
 export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' | 'scheduled' | 'manual' = 'startup'): Promise<boolean> {
   if (!app.isPackaged) return false
   if (!['darwin', 'win32'].includes(process.platform)) return false
+  if (downloadedUpdateReady) return true
 
   const settings = loadSettings()
   if (reason !== 'manual' && !settings.autoUpdateEnabled) return false
-  if (checkInFlight) return false
+  if (checkInFlight) {
+    if (reason === 'manual') throw new Error('An update check is already in progress.')
+    return false
+  }
   if (reason !== 'manual' && reason !== 'settings-enabled' && !shouldRunAutomaticCheck()) return false
 
   checkInFlight = true
   try {
-    if (reason !== 'manual') {
-      patchSettings({ lastAutoUpdateCheckTime: Date.now() })
-    }
     broadcastUpdaterStatus({ type: 'checking' })
     const currentVersion = app.getVersion()
 
@@ -167,13 +152,25 @@ export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' 
     autoUpdater.autoDownload = true
     autoUpdater.autoInstallOnAppQuit = false
     const channel = getUpdateChannel()
-    if (channel) autoUpdater.channel = channel
+    if (channel) {
+      // electron-updater's channel setter implicitly enables downgrades. These
+      // channels select architecture-specific metadata, not release maturity,
+      // so an older GitHub release must never replace a newer installed build.
+      autoUpdater.channel = channel
+      autoUpdater.allowDowngrade = false
+    }
     downloadedUpdateReady = false
 
     console.log(`[Nerion] Auto-update check (${reason}): channel=${autoUpdater.channel ?? 'default'}, checking from ${currentVersion}.`)
     const result = await autoUpdater.checkForUpdates()
+    if (reason !== 'manual') {
+      // Only a completed provider request counts as the daily automatic check.
+      // Network failures are retried by the hourly scheduler instead of being
+      // suppressed for another 24 hours.
+      patchSettings({ lastAutoUpdateCheckTime: Date.now() })
+    }
     const nextVersion = result?.updateInfo?.version
-    if (!nextVersion || compareSemver(nextVersion, currentVersion) <= 0) {
+    if (!nextVersion || compareUpdaterVersions(nextVersion, currentVersion) <= 0) {
       console.log(`[Nerion] Auto-update check (${reason}): already up to date (${currentVersion}).`)
       return false
     }
@@ -185,6 +182,7 @@ export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' 
     const message = err instanceof Error ? err.message : String(err)
     broadcastUpdaterStatus({ type: 'error', message })
     console.error('[Nerion] Auto-update check failed:', err)
+    if (reason === 'manual') throw err
     return false
   } finally {
     checkInFlight = false
@@ -207,4 +205,11 @@ export function scheduleAutoUpdateChecks(): void {
   autoUpdateSchedule = setInterval(() => {
     runAutoUpdateCheck('scheduled').catch(() => {})
   }, AUTO_UPDATE_POLL_MS)
+  autoUpdateSchedule.unref?.()
+}
+
+export function stopAutoUpdateChecks(): void {
+  if (!autoUpdateSchedule) return
+  clearInterval(autoUpdateSchedule)
+  autoUpdateSchedule = null
 }

@@ -10,9 +10,9 @@ import { SmartCleanPanel } from './components/SmartCleanPanel'
 import { ReviewPanel } from './components/ReviewPanel'
 import { useNavigation } from './hooks/useNavigation'
 import { useTreeScanner } from './hooks/useTreeScanner'
-import { isAppleMetadata, isCleanable, isDevDependency } from './utils/cleanable'
+import { isAppleMetadata, isCleanableForHome, isDevDependency } from './utils/cleanable'
 import { isCriticalPath, isContentOnlyProtectedRoot } from './utils/criticalPaths'
-import { DiskEntry, PlatformInfo } from './types'
+import { DiskEntry, PlatformInfo, type DeleteBatchResult } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
 import type { SettingsTab } from './components/SettingsPanel'
 import { OnboardingFlow } from './components/OnboardingFlow'
@@ -21,7 +21,10 @@ import { UpgradeModal } from './components/UpgradeModal'
 import { LicenseModal } from './components/LicenseModal'
 import { WhatsNewModal } from './components/WhatsNewModal'
 import { getDefaultQuickScanFolders, getQuickScanRootPath, resolveQuickFolderPath } from '../shared/policy'
-import { isAbsoluteUiPath, normalizeUiPath, pathBasename, pathParent } from './utils/path'
+import { isAbsoluteUiPath, isSameOrDescendantPath, normalizeUiPath, pathBasename, pathParent } from './utils/path'
+import { usePlatformAppearance } from './hooks/usePlatformAppearance'
+import { canStartFileScan } from './utils/scan-state'
+import { isCoveredByRemovedPath } from './utils/deletion-selection'
 
 interface ContextMenuState {
   entry: DiskEntry
@@ -84,13 +87,45 @@ function getPanelMaxWidth(): number {
 }
 
 export function App() {
+  usePlatformAppearance()
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
+  const [bootstrapError, setBootstrapError] = useState(false)
 
-  useEffect(() => {
-    window.electronAPI.getSettings().then((s) => setOnboardingDone(s.onboardingComplete))
+  const loadBootstrapSettings = useCallback(() => {
+    setBootstrapError(false)
+    setOnboardingDone(null)
+    window.electronAPI.getSettings()
+      .then((settings) => setOnboardingDone(settings.onboardingComplete))
+      .catch(() => setBootstrapError(true))
   }, [])
 
-  if (onboardingDone === null) return null // wait for settings to load
+  useEffect(() => {
+    loadBootstrapSettings()
+  }, [loadBootstrapSettings])
+
+  if (onboardingDone === null) {
+    return (
+      <div className="app-shell flex h-screen items-center justify-center text-zinc-100">
+        {bootstrapError ? (
+          <div role="alert" className="flex max-w-sm flex-col items-center gap-3 px-6 text-center">
+            <p className="text-sm font-medium text-zinc-200">Nerion could not load its settings.</p>
+            <p className="text-xs leading-relaxed text-zinc-500">Check that the app data folder is accessible, then try again.</p>
+            <button
+              onClick={loadBootstrapSettings}
+              className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <div role="status" className="flex items-center gap-2 text-xs text-zinc-500">
+            <span className="h-3 w-3 animate-spin rounded-full border border-transparent border-t-zinc-400" />
+            Loading Nerion…
+          </div>
+        )}
+      </div>
+    )
+  }
 
   if (!onboardingDone) {
     return <OnboardingFlow onComplete={() => setOnboardingDone(true)} />
@@ -108,19 +143,21 @@ function AppShell() {
   const [quickScanFolders, setQuickScanFolders] = useState<string[]>([])
   const [homeDir, setHomeDir] = useState<string | null>(null)
   const [deleteQuotaUsed, setDeleteQuotaUsed] = useState(0)
+  const [initialDataState, setInitialDataState] = useState<'loading' | 'ready' | 'error'>('loading')
 
   // Derived from homeDir — the ~/Library path used as quick scan root
   const QUICK_SCAN_PATH = useMemo(
     () => {
       const value = getQuickScanRootPath(homeDir, platformInfo?.id ?? 'macos')
-      return value ? normalizeUiPath(value) : null
+      return value ?? null
     },
     [homeDir, platformInfo]
   )
 
   // Load initial settings + home dir from main process (process.env.HOME is
   // not reliably available in the Vite-built renderer bundle)
-  useEffect(() => {
+  const loadInitialData = useCallback(() => {
+    setInitialDataState('loading')
     Promise.all([
       window.electronAPI.getSettings(),
       window.electronAPI.getHomeDir(),
@@ -129,12 +166,17 @@ function AppShell() {
       const defaults = getDefaultQuickScanFolders(platform.id)
       setShowDevDeps(s.showDevDependencies ?? false)
       setDeleteImmediately(s.deleteImmediately ?? false)
-      setQuickScanFolders((s.quickScanFolders?.length ? s.quickScanFolders : defaults).map((folder) => isAbsoluteUiPath(folder) || folder.includes('\\') ? normalizeUiPath(folder) : folder))
+      setQuickScanFolders(Array.isArray(s.quickScanFolders) ? s.quickScanFolders : defaults)
       setDeleteQuotaUsed(s.deleteQuota?.used ?? 0)
-      setHomeDir(normalizeUiPath(home))
+      setHomeDir(home)
       setPlatformInfo(platform)
-    })
+      setInitialDataState('ready')
+    }).catch(() => setInitialDataState('error'))
   }, [])
+
+  useEffect(() => {
+    loadInitialData()
+  }, [loadInitialData])
   const [selectedPath, setSelectedPath] = useState('/')
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [selectedPaths, setSelectedPaths] = useState<Map<string, DiskEntry>>(new Map())
@@ -203,20 +245,22 @@ function AppShell() {
     const paths = quickScanFolders
       .map((folder) => resolveQuickFolderPath(folder, homeDir, platformInfo?.id ?? 'macos'))
       .filter((value): value is string => value !== null)
-      .map((value) => normalizeUiPath(value))
-    return paths.length > 0 ? paths : null
+    return paths
   }, [scanMode, quickScanFolders, QUICK_SCAN_PATH, homeDir, platformInfo])
+
+  const scanStartReady = canStartFileScan(initialDataState === 'ready', scanMode, quickScanPaths)
 
   const deepScanPaths = useMemo(() => {
     if (scanMode !== 'deep' || !rootPath || !homeDir) return null
     if ((platformInfo?.id ?? 'macos') === 'windows') return [rootPath]
-    const trashPath = normalizeUiPath(`${homeDir}/.Trash`)
-    const normalizedRoot = rootPath.replace(/\/+$/, '')
-    if (trashPath === normalizedRoot || trashPath.startsWith(normalizedRoot + '/')) return null
+    const trashPath = `${homeDir.replace(/\/+$/, '')}/.Trash`
+    const trashKey = normalizeUiPath(trashPath)
+    const normalizedRoot = normalizeUiPath(rootPath)
+    if (trashKey === normalizedRoot || trashKey.startsWith(normalizedRoot + '/')) return null
     return [rootPath, trashPath]
   }, [scanMode, rootPath, homeDir, platformInfo])
 
-  const { tree, scanning, scannedCount, error, removeEntries, cancelScan } = useTreeScanner(
+  const { tree, scanning, scannedCount, error, summary: scanSummary, suspiciousFindings, removeEntries, cancelScan } = useTreeScanner(
     rootPath,
     scanTrigger,
     scanMode === 'quick' ? quickScanPaths : deepScanPaths
@@ -237,7 +281,7 @@ function AppShell() {
       confirmedDeletedPaths.size === 0 ? entries : entries.filter(e => !confirmedDeletedPaths.has(e.path))
     if (!quickScanAllowedPaths || currentPath !== rootPath) return filterDeleted(raw)
     // At the quick scan root: Library subfolder entries + home-relative entries + custom absolute entries
-    const libraryEntries = raw.filter(e => quickScanAllowedPaths.has(e.path))
+    const libraryEntries = raw.filter(e => quickScanAllowedPaths.has(normalizeUiPath(e.path)))
     const homeEntries: DiskEntry[] = quickScanFolders
       .filter(f => !isAbsoluteUiPath(f) && homeDir)
       .map(f => {
@@ -245,16 +289,16 @@ function AppShell() {
         if (!resolvedPath) return null
         const normalizedResolvedPath = normalizeUiPath(resolvedPath)
         if (!quickScanAllowedPaths.has(normalizedResolvedPath)) return null
-        const children = getTreeEntries(tree, normalizedResolvedPath)
+        const children = getTreeEntries(tree, resolvedPath)
         const totalKB = children.reduce((s, e) => s + e.sizeKB, 0)
-        return { name: f, path: normalizedResolvedPath, sizeKB: totalKB, isDir: true } as DiskEntry
+        return { name: f, path: resolvedPath, sizeKB: totalKB, isDir: true } as DiskEntry
       })
       .filter((e): e is DiskEntry => e !== null)
     const customEntries: DiskEntry[] = quickScanFolders
       .filter((f) => {
-        if (!isAbsoluteUiPath(f) || !quickScanAllowedPaths.has(f)) return false
+        if (!isAbsoluteUiPath(f) || !quickScanAllowedPaths.has(normalizeUiPath(f))) return false
         if (!QUICK_SCAN_PATH) return true
-        return !(f === QUICK_SCAN_PATH || f.startsWith(QUICK_SCAN_PATH + '/'))
+        return !isSameOrDescendantPath(f, QUICK_SCAN_PATH)
       })
       .map(f => {
         const children = getTreeEntries(tree, f)
@@ -275,7 +319,7 @@ function AppShell() {
     // Downloads is to clean it up.
     const downloadsParents = new Set<string>()
     if (rootPath && pathBasename(rootPath).toLowerCase() === 'downloads') {
-      downloadsParents.add(rootPath)
+      downloadsParents.add(normalizeUiPath(rootPath))
     }
     if (quickScanAllowedPaths) {
       for (const p of quickScanAllowedPaths) {
@@ -293,7 +337,7 @@ function AppShell() {
     for (const entries of tree.values()) {
       for (const entry of entries) {
         if (isAppleMetadata(entry)) continue
-        if (isCriticalPath(entry.path) && !isContentOnlyProtectedRoot(entry.path)) continue
+        if (isCriticalPath(entry.path, homeDir) && !isContentOnlyProtectedRoot(entry.path, homeDir)) continue
         const isDev = isDevDependency(entry)
 
         // Direct children of a targeted Downloads folder are always cleanable
@@ -310,13 +354,13 @@ function AppShell() {
           // own guards (MANAGED_PATH_SUBSTRINGS / SYSTEM_PATH_PREFIXES) and should
           // surface from anywhere the scanner visited, including non-preset Library
           // subdirs and any custom quick-scan paths the user has added.
-          const ok = allowedPrefixes.some(p => entry.path === p || entry.path.startsWith(p + '/'))
+          const ok = allowedPrefixes.some(p => isSameOrDescendantPath(entry.path, p))
           if (!ok) continue
         }
-        const isProtectedRootContentsOnly = isContentOnlyProtectedRoot(entry.path)
+        const isProtectedRootContentsOnly = isContentOnlyProtectedRoot(entry.path, homeDir)
         if (isProtectedRootContentsOnly) continue
 
-        if (isCleanable(entry) || isDev || isDownloadsItem || isTrashItem)
+        if (isCleanableForHome(entry, homeDir) || isDev || isDownloadsItem || isTrashItem)
           result.set(entry.path, entry)
       }
     }
@@ -330,13 +374,13 @@ function AppShell() {
   const allCleanableRef = useRef(allCleanable)
   allCleanableRef.current = allCleanable
   useEffect(() => {
-    if (prevScanning.current && !scanning && rootPath) {
+    if (prevScanning.current && !scanning && rootPath && scanSummary?.complete && !scanSummary.cancelled) {
       let foundKB = 0
       for (const e of allCleanableRef.current.values()) foundKB += e.sizeKB
       window.electronAPI.notifyManualScanDone(foundKB)
     }
     prevScanning.current = scanning
-  }, [scanning])
+  }, [rootPath, scanSummary, scanning])
 
   // ── Panel drag handlers ────────────────────────────────────────────────────
 
@@ -390,7 +434,8 @@ function AppShell() {
   // ── Scan ──────────────────────────────────────────────────────────────────
 
   const handleScan = useCallback((pathOverride?: string) => {
-    const path = normalizeUiPath(pathOverride ?? (scanMode === 'quick' && QUICK_SCAN_PATH ? QUICK_SCAN_PATH : selectedPath))
+    if (!scanStartReady) return
+    const path = pathOverride ?? (scanMode === 'quick' && QUICK_SCAN_PATH ? QUICK_SCAN_PATH : selectedPath)
     resetTo(path)
     setRootPath(path)
     setScanTrigger(t => t + 1)
@@ -401,30 +446,31 @@ function AppShell() {
     setInfoPanelEntry(null)
     setSmartCleanOpen(false)
     setSavedLeftoverSelection(null)
-  }, [scanMode, QUICK_SCAN_PATH, selectedPath, resetTo])
+  }, [scanStartReady, scanMode, QUICK_SCAN_PATH, selectedPath, resetTo])
 
   /** Triggered by the Scan button on the welcome screen — animates controls out then starts scan. */
   const handleScanFromWelcome = useCallback(() => {
+    if (!scanStartReady || scanPhase === 'departing') return
     const effectivePath = scanMode === 'quick' && QUICK_SCAN_PATH ? QUICK_SCAN_PATH : selectedPath
     setScanPhase('departing')
     setTimeout(() => {
       setScanPhase('active')
       handleScan(effectivePath)
     }, 320)
-  }, [handleScan, scanMode, selectedPath, QUICK_SCAN_PATH])
+  }, [scanStartReady, scanPhase, handleScan, scanMode, selectedPath, QUICK_SCAN_PATH])
 
   const handleChooseFolder = useCallback(async () => {
+    if (scanPhase === 'departing') return
     const picked = await window.electronAPI.openDirectory()
     if (!picked) return
-    const normalizedPicked = normalizeUiPath(picked)
-    setSelectedPath(normalizedPicked)
+    setSelectedPath(picked)
 
     // If a scan has already completed, clear the previous results and return to
     // the empty/welcome view until the user starts the next scan.
     if (scanPhase === 'active' && !scanning) {
       setScanPhase('arriving')
       setRootPath(null)
-      resetTo(normalizedPicked)
+      resetTo(picked)
       setSelectedPaths(new Map())
       setContextMenu(null)
       setInfoPanelEntry(null)
@@ -435,7 +481,7 @@ function AppShell() {
   }, [scanPhase, scanning, resetTo])
 
   const handleToggleScanMode = useCallback((mode: ScanMode) => {
-    if (mode === scanMode) return
+    if (mode === scanMode || scanPhase === 'departing') return
     setScanMode(mode)
 
     // Switching modes after a completed scan should return to the empty state
@@ -530,48 +576,47 @@ function AppShell() {
   // ── Trash ─────────────────────────────────────────────────────────────────
 
   /** Called by ReviewPanel after the user confirms. Trashes only the paths they kept selected. */
-  const handleConfirmTrash = useCallback(async (paths: string[], totalKB: number) => {
-    if (paths.length === 0) return null
+  const handleConfirmTrash = useCallback(async (paths: string[], _totalKB: number): Promise<DeleteBatchResult> => {
+    if (paths.length === 0) {
+      return { items: [], requestedCount: 0, successfulCount: 0, failedCount: 0, quotaUsed: 0, reclaimedBytes: 0, movedToTrashBytes: 0, error: null }
+    }
 
-    const deletedPathSet = new Set(paths)
+    const result = await window.electronAPI.trashEntries(paths)
+    const removedPaths = [...new Set(result.items.flatMap((item) =>
+      item.operations
+        .filter((operation) => ['moved-to-trash', 'permanently-removed', 'already-missing'].includes(operation.status))
+        .map((operation) => operation.path)
+    ))]
 
-    // Stream progress: update tree + selection as each file is confirmed deleted.
-    let deletedCount = 0
-    const unsubscribe = window.electronAPI.onTrashProgress(({ path: p, success }) => {
-      if (success) {
-        deletedCount++
-        removeEntries([p])
-        setSelectedPaths(prev => { const next = new Map(prev); next.delete(p); return next })
-        setConfirmedDeletedPaths(prev => new Set([...prev, p]))
-        setSavedLeftoverSelection(prev => {
-          if (prev === null || !prev.has(p)) return prev
-          const next = new Set(prev)
-          next.delete(p)
-          return next
-        })
-      }
-    })
-
-    const err = await window.electronAPI.trashEntries(paths)
-    unsubscribe()
-
-    // Notify only if at least some files were actually deleted.
-    // confirmedDeletedPaths is intentionally NOT reset here — it persists until the next scan
-    // so that stale tree entries (from batched IPC flushes or timing races) remain hidden.
-    if (deletedCount > 0) {
+    if (removedPaths.length > 0) {
+      removeEntries(removedPaths)
+      setSelectedPaths((previous) => {
+        const next = new Map(previous)
+        for (const itemPath of next.keys()) {
+          if (isCoveredByRemovedPath(itemPath, removedPaths)) {
+            next.delete(itemPath)
+          }
+        }
+        return next
+      })
+      setConfirmedDeletedPaths((previous) => new Set([...previous, ...removedPaths]))
       setSavedLeftoverSelection(prev => {
         if (prev === null) return prev
         const next = new Set(prev)
         let changed = false
-        for (const p of deletedPathSet) {
-          if (next.delete(p)) changed = true
+        for (const itemPath of next) {
+          if (isCoveredByRemovedPath(itemPath, removedPaths)) {
+            next.delete(itemPath)
+            changed = true
+          }
         }
         return changed ? next : prev
       })
-      window.electronAPI.notifyCleaned(totalKB)
     }
+    if (result.quotaUsed > 0) setDeleteQuotaUsed((used) => used + result.quotaUsed)
+    if (result.reclaimedBytes > 0) window.electronAPI.notifyCleaned(Math.ceil(result.reclaimedBytes / 1024))
 
-    return err
+    return result
   }, [removeEntries])
 
   // Cmd+, opens settings
@@ -645,7 +690,7 @@ function AppShell() {
   const smartCleanRootPath = scanMode === 'quick' && homeDir ? homeDir : (rootPath ?? '/')
 
   return (
-    <div className="flex flex-col h-screen bg-zinc-950 text-zinc-100 select-none overflow-hidden">
+    <div className="app-shell flex flex-col h-screen text-zinc-100 select-none overflow-hidden">
       <Toolbar onSettingsOpen={() => {
         setSettingsRequestedTab(null)
         setSettingsOpen(true)
@@ -707,7 +752,8 @@ function AppShell() {
                       <button
                         key={mode}
                         onClick={() => handleToggleScanMode(mode)}
-                        className={['px-4 py-1.5 rounded-md text-xs font-medium transition-colors capitalize', scanMode === mode ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:text-zinc-300'].join(' ')}
+                        disabled={scanPhase === 'departing'}
+                        className={['px-4 py-1.5 rounded-md text-xs font-medium transition-colors capitalize disabled:cursor-not-allowed disabled:opacity-40', scanMode === mode ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:text-zinc-300'].join(' ')}
                       >
                         {mode}
                       </button>
@@ -725,22 +771,33 @@ function AppShell() {
                       </span>
                       <button
                         onClick={handleChooseFolder}
-                        className="text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors ml-1 border-l border-white/10 pl-2"
+                        disabled={scanPhase === 'departing'}
+                        className="text-[11px] text-zinc-500 hover:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-40 transition-colors ml-1 border-l border-white/10 pl-2"
                       >
                         Change
                       </button>
                     </div>
                   ) : (
-                  <p className="text-xs text-zinc-600">
-                    {quickScanFolders.length > 0
-                      ? quickScanFolders.map(f => isAbsoluteUiPath(f) ? pathBasename(f) : f).join(' · ')
-                      : 'No folders selected — configure in Settings'}
-                  </p>
+                  initialDataState === 'error' ? (
+                    <div role="alert" className="flex items-center gap-2 text-xs text-amber-300/80">
+                      <span>Scan settings could not be loaded.</span>
+                      <button onClick={loadInitialData} className="text-blue-400 hover:text-blue-300">Retry</button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-zinc-600">
+                      {initialDataState === 'loading'
+                        ? 'Loading scan settings…'
+                        : quickScanFolders.length > 0
+                        ? quickScanFolders.map(f => isAbsoluteUiPath(f) ? pathBasename(f) : f).join(' · ')
+                        : 'No folders selected — configure in Settings'}
+                    </p>
+                  )
                   )}
 
                   <button
                     onClick={handleScanFromWelcome}
-                    className="px-8 py-2 rounded-md bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-sm font-medium text-white transition-colors"
+                    disabled={!scanStartReady || scanPhase === 'departing'}
+                    className="px-8 py-2 rounded-md bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-medium text-white transition-colors"
                   >
                     Scan
                   </button>
@@ -807,6 +864,8 @@ function AppShell() {
                   <SmartCleanPanel
                     allCleanable={allCleanable}
                     fullTree={tree}
+                    suspiciousFindings={suspiciousFindings}
+                    securityAnalysis={scanSummary?.securityAnalysis ?? null}
                     rootPath={smartCleanRootPath}
                     homeDir={homeDir}
                     autoSelectDevDependencies={showDevDeps}
@@ -897,7 +956,7 @@ function AppShell() {
         <div className="fixed top-4 right-4 z-[100] max-w-sm">
           <button
             onClick={handleOpenUpdateSettings}
-            className="w-full rounded-xl border border-blue-500/30 bg-zinc-950/95 px-4 py-3 text-left shadow-2xl shadow-black/30 backdrop-blur-xl transition-colors hover:border-blue-400/50 hover:bg-zinc-900"
+            className="glass-popover w-full rounded-xl border border-blue-500/30 px-4 py-3 text-left transition-colors hover:border-blue-400/50"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">

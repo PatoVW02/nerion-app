@@ -72,7 +72,7 @@ export function InfoPanel({ entry, isSelected, isPremium, onClose, onToggleSelec
   const [analysisError, setAnalysisError] = useState<string | null>(null)
   const [analysisComplete, setAnalysisComplete] = useState(false)
   const [aiHidden, setAiHidden] = useState(() => localStorage.getItem('nerion:aiHidden') === 'true')
-  const [aiMode, setAiMode] = useState<'cloud' | 'ollama'>('cloud')
+  const [aiMode, setAiMode] = useState<'cloud' | 'ollama'>('ollama')
 
   // Trigger slide-in on mount + read AI mode preference
   useEffect(() => {
@@ -101,8 +101,9 @@ export function InfoPanel({ entry, isSelected, isPremium, onClose, onToggleSelec
       else setStats(result)
     }).catch(() => setStatsError(true))
 
-    // AI analysis is a premium feature — skip entirely for free users
-    if (!isPremium) return
+    // AI analysis is a premium feature and an explicit opt-in. When the user
+    // hides it, do not spend CPU/network resources on a stream they cannot see.
+    if (!isPremium || aiHidden) return
 
     window.electronAPI.removeOllamaListeners()
     window.electronAPI.onOllamaModel((m) => setModel(m))
@@ -122,7 +123,7 @@ export function InfoPanel({ entry, isSelected, isPremium, onClose, onToggleSelec
       window.electronAPI.cancelOllamaAnalysis()
       window.electronAPI.removeOllamaListeners()
     }
-  }, [entry, isPremium])
+  }, [entry, isPremium, aiHidden])
 
   const upper = analysis.toUpperCase()
   const recommendation: 'KEEP' | 'DELETE' | null = upper.includes('RECOMMENDATION: DELETE')
@@ -136,7 +137,7 @@ export function InfoPanel({ entry, isSelected, isPremium, onClose, onToggleSelec
   return (
     <div
       className={[
-        'flex flex-col h-full bg-zinc-950',
+        'glass-panel flex flex-col h-full',
         'transition-opacity duration-150 ease-out',
         mounted ? 'opacity-100' : 'opacity-0'
       ].join(' ')}

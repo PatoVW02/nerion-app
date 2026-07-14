@@ -25,13 +25,40 @@ function detectHomeDir(platform: AppPlatform): string | null {
 }
 
 function normalizeMacPath(itemPath: string): string {
-  return itemPath.replace(/\/+$/, '') || '/'
+  const absolute = itemPath.startsWith('/')
+  const stack: string[] = []
+  for (const segment of itemPath.split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (stack.length > 0) stack.pop()
+      continue
+    }
+    stack.push(segment)
+  }
+  const normalized = `${absolute ? '/' : ''}${stack.join('/')}`
+  return normalized.replace(/\/+$/, '') || (absolute ? '/' : '.')
 }
 
 function normalizeWindowsPath(itemPath: string): string {
-  const normalized = itemPath.replace(/\//g, '\\').replace(/\\+$/, '')
-  if (/^[a-z]:$/i.test(normalized)) return `${normalized}\\`
-  return normalized
+  const slashified = itemPath.replace(/\//g, '\\')
+  const drive = slashified.match(/^([a-z]:)\\/i)
+  const unc = slashified.match(/^\\\\([^\\]+)\\([^\\]+)(?:\\|$)/)
+  const root = drive ? `${drive[1]}\\` : unc ? `\\\\${unc[1]}\\${unc[2]}` : ''
+  const remainder = drive
+    ? slashified.slice(drive[0].length)
+    : unc ? slashified.slice(unc[0].length) : slashified
+  const stack: string[] = []
+  for (const segment of remainder.split('\\')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (stack.length > 0) stack.pop()
+      continue
+    }
+    stack.push(segment)
+  }
+  if (!root) return stack.join('\\') || '.'
+  if (drive) return stack.length > 0 ? `${root}${stack.join('\\')}` : root
+  return stack.length > 0 ? `${root}\\${stack.join('\\')}` : root
 }
 
 export function normalizePathForPlatform(itemPath: string, platform: AppPlatform = detectRuntimePlatform()): string {
@@ -50,7 +77,12 @@ function getMacQuickFolderPath(folder: string, homeDir: string): string {
 }
 
 function getWindowsQuickFolderPath(folder: string, homeDir: string): string {
-  if (/^[a-z]:(\\|\/)/i.test(folder) || /^[a-z]:$/i.test(folder)) return folder
+  if (
+    /^[a-z]:(\\|\/)/i.test(folder)
+    || /^[a-z]:$/i.test(folder)
+    || /^\\\\[^\\]+\\[^\\]+/.test(folder)
+    || /^\/\/[^/]+\/[^/]+/.test(folder)
+  ) return folder
   switch (folder) {
     case 'Temp':
       return `${homeDir}\\AppData\\Local\\Temp`
@@ -128,6 +160,7 @@ export function isDevDependency(entry: DiskEntry, platform: AppPlatform = detect
     : ['/opt/', '/usr/', '/system/', '/library/', '/applications/', '/developer/', '/private/', '/bin/', '/sbin/']
 
   if (blockedPrefixes.some((prefix) => pathValue.startsWith(prefix))) return false
+  if (platform === 'windows' && /^[a-z]:\\(windows|program files|program files \(x86\)|programdata)\\/i.test(pathValue)) return false
 
   const managedSubstrings = platform === 'windows'
     ? ['\\appdata\\local\\programs\\', '\\appdata\\roaming\\code\\', '\\program files\\', '\\windowsapps\\']
@@ -136,7 +169,11 @@ export function isDevDependency(entry: DiskEntry, platform: AppPlatform = detect
   return !managedSubstrings.some((segment) => pathValue.includes(segment))
 }
 
-export function isCleanable(entry: DiskEntry, platform: AppPlatform = detectRuntimePlatform()): boolean {
+export function isCleanable(
+  entry: DiskEntry,
+  platform: AppPlatform = detectRuntimePlatform(),
+  explicitHomeDir?: string | null,
+): boolean {
   if (isAppleMetadata(entry, platform)) return false
   const cleanableNames = platform === 'windows'
     ? new Set(['temp', 'tmp', 'logs', 'cache', 'caches'])
@@ -147,26 +184,22 @@ export function isCleanable(entry: DiskEntry, platform: AppPlatform = detectRunt
 
   const pathValue = lower(normalizePathForPlatform(entry.path, platform))
   if (platform === 'windows') {
-    return !(
-      pathValue.startsWith('c:\\windows\\')
-      || pathValue.startsWith('c:\\program files\\')
-      || pathValue.startsWith('c:\\program files (x86)\\')
-      || pathValue.includes('\\onedrive\\')
-    )
+    const home = lower(normalizeWindowsPath(explicitHomeDir ?? detectHomeDir(platform) ?? 'c:\\users\\__unknown__'))
+    const safeRoots = [
+      `${home}\\appdata\\local\\temp`,
+      `${home}\\appdata\\local\\logs`,
+    ]
+    return safeRoots.some((root) => pathValue === root || pathValue.startsWith(`${root}\\`))
   }
 
-  return !(
-    pathValue.startsWith('/opt/')
-    || pathValue.startsWith('/usr/')
-    || pathValue.startsWith('/system/')
-    || pathValue.startsWith('/library/')
-    || pathValue.startsWith('/applications/')
-    || pathValue.startsWith('/developer/')
-    || pathValue.startsWith('/private/')
-    || pathValue.startsWith('/bin/')
-    || pathValue.startsWith('/sbin/')
-    || pathValue.includes('/library/containers/')
-  )
+  const home = lower(normalizeMacPath(explicitHomeDir ?? detectHomeDir(platform) ?? '/Users/__unknown__'))
+  const safeRoots = [
+    `${home}/.cache`,
+    `${home}/library/caches`,
+    `${home}/library/logs`,
+    `${home}/library/developer/xcode/deriveddata`,
+  ]
+  return safeRoots.some((root) => pathValue === root || pathValue.startsWith(`${root}/`))
 }
 
 export function isCriticalPath(itemPath: string, platform: AppPlatform = detectRuntimePlatform(), explicitHomeDir?: string | null): boolean {
@@ -175,6 +208,17 @@ export function isCriticalPath(itemPath: string, platform: AppPlatform = detectR
   const pathValue = lower(normalized)
 
   if (platform === 'windows') {
+    const raw = itemPath.replace(/\//g, '\\')
+    // Device namespaces and administrative shares can alias protected local
+    // paths while bypassing ordinary drive-letter comparisons. Alternate data
+    // streams are not valid cleanup selections either.
+    if (
+      /^\\\\[?.]\\/i.test(raw)
+      || /^\\(?:\?\?|globalroot)\\/i.test(raw)
+      || /^\\\\[^\\]+\\(?:[a-z]|admin|ipc|print)\$(?:\\|$)/i.test(raw)
+      || (/^[a-z]:/i.test(raw) && raw.slice(2).includes(':'))
+    ) return true
+    if (!/^[a-z]:\\/i.test(normalized) && !/^\\\\[^\\]+\\[^\\]+/i.test(normalized)) return true
     const home = lower(homeDir ?? 'c:\\users\\__unknown__')
     const exact = new Set([
       'c:\\',
@@ -196,15 +240,17 @@ export function isCriticalPath(itemPath: string, platform: AppPlatform = detectR
       'c:\\$recycle.bin',
     ])
     if (exact.has(pathValue)) return true
+    if (/^[a-z]:\\$/i.test(pathValue) || /^\\\\[^\\]+\\[^\\]+$/i.test(pathValue)) return true
+    if (/^[a-z]:\\(windows|program files|program files \(x86\)|programdata|users)$/i.test(pathValue)) return true
     return (
-      pathValue.startsWith('c:\\windows\\')
-      || pathValue.startsWith('c:\\program files\\')
-      || pathValue.startsWith('c:\\program files (x86)\\')
-      || pathValue.startsWith('c:\\programdata\\microsoft\\')
-      || /c:\\users\\[^\\]+$/.test(pathValue)
+      /^[a-z]:\\(windows|program files|program files \(x86\))\\/i.test(pathValue)
+      || /^[a-z]:\\programdata\\microsoft\\/i.test(pathValue)
+      || /^[a-z]:\\users\\[^\\]+$/i.test(pathValue)
       || pathValue.includes('\\onedrive\\')
     )
   }
+
+  if (!normalized.startsWith('/')) return true
 
   const home = homeDir ?? '/Users/__unknown__'
   const contentOnlyRoots = [
@@ -220,6 +266,14 @@ export function isCriticalPath(itemPath: string, platform: AppPlatform = detectR
     `${home}/Library/HTTPStorages`,
     `${home}/Library/Saved Application State`,
     `${home}/Library/WebKit`,
+  ]
+  const sensitiveUserRoots = [
+    `${home}/Library/CloudStorage`,
+    `${home}/Library/Keychains`,
+    `${home}/Library/Mobile Documents`,
+    `${home}/Library/Mail`,
+    `${home}/Library/Messages`,
+    `${home}/Library/Safari`,
   ]
 
   const blockedExact = new Set([
@@ -258,17 +312,24 @@ export function isCriticalPath(itemPath: string, platform: AppPlatform = detectR
 
   if (blockedExact.has(normalized)) return true
 
+  // Leftover detection may surface one direct third-party artifact from these
+  // bounded system Library locations. Their parent roots remain protected.
+  const allowedSystemLibraryArtifact = /^\/Library\/(Application Support|LaunchAgents|LaunchDaemons)\/[^/]+$/.test(normalized)
+  const insideSensitiveUserRoot = sensitiveUserRoots.some((root) => normalized === root || normalized.startsWith(`${root}/`))
+
   return (
     normalized.startsWith('/System/')
-    || normalized.startsWith('/Library/')
+    || (!allowedSystemLibraryArtifact && normalized.startsWith('/Library/'))
     || normalized.startsWith('/usr/')
     || normalized.startsWith('/var/')
     || normalized.startsWith('/private/')
     || normalized.startsWith('/sbin/')
     || normalized.startsWith('/bin/')
     || normalized.startsWith('/lib/')
+    || /^\/Volumes\/[^/]+$/.test(normalized)
+    || /^\/Network\/[^/]+$/.test(normalized)
     || /^\/Users\/[^/]+$/.test(normalized)
-    || /^\/Users\/[^/]+\/Library\/(Containers|CloudStorage|Keychains|Mobile Documents|Mail|Messages|Safari)\//.test(normalized)
+    || insideSensitiveUserRoot
   )
 }
 
@@ -287,10 +348,24 @@ export function isContentOnlyProtectedRoot(itemPath: string, platform: AppPlatfo
       || pathValue === `${home}\\music`
       || pathValue === `${home}\\videos`
       || pathValue === `${home}\\appdata\\local\\temp`
-      || pathValue === 'c:\\$recycle.bin'
+      || pathValue === `${home}\\appdata\\local\\logs`
+      || /^[a-z]:\\\$recycle\.bin$/i.test(pathValue)
     )
   }
 
-  return /^\/Users\/[^/]+\/(Desktop|Downloads|Documents|Movies|Music|Pictures|\.Trash)$/.test(normalized)
-    || /^\/Users\/[^/]+\/Library\/(Caches|Logs|HTTPStorages|Saved Application State|WebKit)$/.test(normalized)
+  const home = normalizeMacPath(homeDir ?? '/Users/__unknown__')
+  return new Set([
+    `${home}/Desktop`,
+    `${home}/Downloads`,
+    `${home}/Documents`,
+    `${home}/Movies`,
+    `${home}/Music`,
+    `${home}/Pictures`,
+    `${home}/.Trash`,
+    `${home}/Library/Caches`,
+    `${home}/Library/Logs`,
+    `${home}/Library/HTTPStorages`,
+    `${home}/Library/Saved Application State`,
+    `${home}/Library/WebKit`,
+  ]).has(normalized)
 }

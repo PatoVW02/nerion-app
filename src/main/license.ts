@@ -1,85 +1,94 @@
-import { net, app } from 'electron'
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { app, BrowserWindow, net, safeStorage } from 'electron'
 import { createHmac } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import * as path from 'node:path'
-import * as os from 'node:os'
+import type { LicenseKind, LicenseSnapshot } from '../shared/contracts'
 
-// ─── Lemon Squeezy config ─────────────────────────────────────────────────────
-// https://docs.lemonsqueezy.com/api/license-keys
 const LS_API = 'https://api.lemonsqueezy.com/v1/licenses'
-
-// Numeric variant IDs from the LS dashboard — used to reliably tell subscription
-// apart from lifetime when expires_at and subscription_id are both absent/null.
-// Find them at: LemonSqueezy dashboard → Products → <product> → Variants → ID column.
+const VALIDATION_INTERVAL_MS = 24 * 60 * 60 * 1000
+const MONTHLY_OFFLINE_GRACE_MS = 72 * 60 * 60 * 1000
 const env = (import.meta as unknown as { env: Record<string, string> }).env
 const MONTHLY_VARIANT_ID = env.VITE_MONTHLY_VARIANT_ID ? Number(env.VITE_MONTHLY_VARIANT_ID) : null
 const LIFETIME_VARIANT_ID = env.VITE_LIFETIME_VARIANT_ID ? Number(env.VITE_LIFETIME_VARIANT_ID) : null
 
-/** Determine subscription vs lifetime from a LemonSqueezy API response meta object. */
-function detectLicenseType(meta: {
-  variant_id?: number | null
-  variant_name?: string | null
-  subscription_id?: number | null
-} | undefined, licenseKey: {
-  expires_at?: string | null
-} | undefined): 'subscription' | 'lifetime' {
-  const variantId = meta?.variant_id ?? null
-
-  // 1. Variant ID match against configured IDs — most reliable
-  if (variantId !== null && MONTHLY_VARIANT_ID !== null && variantId === MONTHLY_VARIANT_ID) return 'subscription'
-  if (variantId !== null && LIFETIME_VARIANT_ID !== null && variantId === LIFETIME_VARIANT_ID) return 'lifetime'
-
-  // 2. subscription_id in meta — present for subscription purchases on some LS configs
-  if (meta?.subscription_id != null) return 'subscription'
-
-  // 3. expires_at on the license key — set to renewal date on some LS configs
-  if (licenseKey?.expires_at != null) return 'subscription'
-
-  // 4. variant_name keyword match — last resort
-  const variantName = (meta?.variant_name ?? '').toLowerCase()
-  if (/month|year|annual|week|subscript/.test(variantName)) return 'subscription'
-
-  return 'lifetime'
-}
-
-// How many days the app works offline after last successful validation
-const GRACE_PERIOD_DAYS = 7
-
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface LicenseFile {
+  schemaVersion: 3
   key: string
   instanceId: string
-  licenseType: 'subscription' | 'lifetime'
+  kind: Exclude<LicenseKind, null>
   status: 'active' | 'inactive' | 'expired' | 'disabled'
   customerEmail: string | null
   expiresAt: string | null
-  lastValidated: string   // ISO date
-  sig?: string            // HMAC-SHA256 of the above fields — tamper detection
+  lastValidated: string
+  lastValidationAttempt: string
+  validationError: string | null
+  needsMonthlyCancellation: boolean
+  requiresOnlineValidation: boolean
 }
 
-export interface LicenseInfo {
-  active: boolean
-  licenseType: 'subscription' | 'lifetime' | null
-  maskedKey: string | null    // e.g. "ABCD-****-****-WXYZ"
-  customerEmail: string | null
-  expiresAt: string | null
-  lastValidated: string | null
+interface SecureLicenseEnvelope {
+  schemaVersion: 3
+  encrypted: string
 }
 
-// ─── Disk helpers ─────────────────────────────────────────────────────────────
+interface LicenseMeta {
+  variant_id?: number | null
+  variant_name?: string | null
+  subscription_id?: number | null
+  customer_email?: string | null
+}
+
+interface LicenseKeyPayload {
+  status?: string
+  expires_at?: string | null
+}
+
+interface ActivateResponse {
+  activated?: boolean
+  error?: string
+  license_key?: LicenseKeyPayload
+  instance?: { id?: string }
+  meta?: LicenseMeta
+}
+
+interface ValidateResponse {
+  valid?: boolean
+  error?: string
+  license_key?: LicenseKeyPayload
+  meta?: LicenseMeta
+}
+
+let revalidationInFlight: Promise<LicenseSnapshot> | null = null
+let validationPollTimer: NodeJS.Timeout | null = null
+
 function getLicensePath(): string {
   return path.join(app.getPath('userData'), 'license.json')
 }
 
-// ─── HMAC tamper protection ───────────────────────────────────────────────────
-// The key is derived from the app name + version (deterministic, not on disk).
-// This blocks casual text-editor tampering; server revalidation is the real gate.
-function getHmacKey(): string {
-  return app.name
+/**
+ * Recognizes schema-v2 files created by Nerion 1.4.x. This application-name
+ * HMAC is not proof of entitlement, so migration always disables access until
+ * Lemon Squeezy validates the preserved key and instance online. New files use
+ * the OS-backed Electron safeStorage service instead.
+ */
+function computeV2Sig(data: Record<string, unknown>): string {
+  return createHmac('sha256', app.name).update(JSON.stringify({
+    schemaVersion: data.schemaVersion,
+    key: data.key,
+    instanceId: data.instanceId,
+    kind: data.kind,
+    status: data.status,
+    customerEmail: data.customerEmail,
+    expiresAt: data.expiresAt,
+    lastValidated: data.lastValidated,
+    lastValidationAttempt: data.lastValidationAttempt,
+    validationError: data.validationError,
+    needsMonthlyCancellation: data.needsMonthlyCancellation,
+  })).digest('hex')
 }
 
-function computeSig(data: Omit<LicenseFile, 'sig'>): string {
-  const payload = JSON.stringify({
+function computeLegacySig(data: Record<string, unknown>): string {
+  return createHmac('sha256', app.name).update(JSON.stringify({
     key: data.key,
     instanceId: data.instanceId,
     licenseType: data.licenseType,
@@ -87,169 +96,411 @@ function computeSig(data: Omit<LicenseFile, 'sig'>): string {
     customerEmail: data.customerEmail,
     expiresAt: data.expiresAt,
     lastValidated: data.lastValidated,
+  })).digest('hex')
+}
+
+function parseLicensePayload(value: unknown): LicenseFile | null {
+  if (!value || typeof value !== 'object') return null
+  const parsed = value as Record<string, unknown>
+  if (parsed.schemaVersion !== 3) return null
+  if (typeof parsed.key !== 'string' || !parsed.key) return null
+  if (typeof parsed.instanceId !== 'string' || !parsed.instanceId) return null
+  if (parsed.kind !== 'monthly' && parsed.kind !== 'lifetime') return null
+  if (!['active', 'inactive', 'expired', 'disabled'].includes(String(parsed.status))) return null
+  if (parsed.customerEmail !== null && typeof parsed.customerEmail !== 'string') return null
+  if (parsed.expiresAt !== null && typeof parsed.expiresAt !== 'string') return null
+  if (typeof parsed.lastValidated !== 'string' || typeof parsed.lastValidationAttempt !== 'string') return null
+  if (parsed.validationError !== null && typeof parsed.validationError !== 'string') return null
+  if (typeof parsed.needsMonthlyCancellation !== 'boolean') return null
+  if (typeof parsed.requiresOnlineValidation !== 'boolean') return null
+
+  return parsed as unknown as LicenseFile
+}
+
+function protectLicense(data: LicenseFile): SecureLicenseEnvelope {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Secure license storage is unavailable on this device.')
+  }
+  return {
+    schemaVersion: 3,
+    encrypted: safeStorage.encryptString(JSON.stringify(data)).toString('base64'),
+  }
+}
+
+function unprotectLicense(value: unknown): LicenseFile | null {
+  if (!value || typeof value !== 'object') return null
+  const envelope = value as Partial<SecureLicenseEnvelope>
+  if (envelope.schemaVersion !== 3 || typeof envelope.encrypted !== 'string' || !envelope.encrypted) return null
+  if (!safeStorage.isEncryptionAvailable()) return null
+  try {
+    const plaintext = safeStorage.decryptString(Buffer.from(envelope.encrypted, 'base64'))
+    return parseLicensePayload(JSON.parse(plaintext))
+  } catch {
+    return null
+  }
+}
+
+function migrateLegacyFile(parsed: Record<string, unknown>): LicenseFile | null {
+  const migrationAttempt = new Date(0).toISOString()
+  const migrationError = 'This upgraded license must be verified online before paid features can be used.'
+
+  if (parsed.schemaVersion === 2) {
+    const { sig, ...rest } = parsed
+    if (typeof sig !== 'string' || sig !== computeV2Sig(rest)) return null
+    const migrated = parseLicensePayload({
+      ...rest,
+      schemaVersion: 3,
+      status: 'inactive',
+      lastValidationAttempt: migrationAttempt,
+      validationError: migrationError,
+      needsMonthlyCancellation: false,
+      requiresOnlineValidation: true,
+    })
+    if (!migrated) return null
+    saveFile(migrated)
+    return migrated
+  }
+
+  if (typeof parsed.sig !== 'string' || parsed.sig !== computeLegacySig(parsed)) return null
+  if (parsed.licenseType !== 'subscription' && parsed.licenseType !== 'lifetime') return null
+  const lastValidated = typeof parsed.lastValidated === 'string' ? parsed.lastValidated : new Date(0).toISOString()
+  const migrated = parseLicensePayload({
+    schemaVersion: 3,
+    key: String(parsed.key ?? ''),
+    instanceId: String(parsed.instanceId ?? ''),
+    kind: parsed.licenseType === 'subscription' ? 'monthly' : 'lifetime',
+    status: ['active', 'inactive', 'expired', 'disabled'].includes(String(parsed.status))
+      ? parsed.status as LicenseFile['status']
+      : 'inactive',
+    customerEmail: typeof parsed.customerEmail === 'string' ? parsed.customerEmail : null,
+    expiresAt: typeof parsed.expiresAt === 'string' ? parsed.expiresAt : null,
+    lastValidated,
+    lastValidationAttempt: migrationAttempt,
+    validationError: migrationError,
+    needsMonthlyCancellation: false,
+    requiresOnlineValidation: true,
   })
-  return createHmac('sha256', getHmacKey()).update(payload).digest('hex')
+  if (!migrated) return null
+  saveFile(migrated)
+  return migrated
 }
 
 function loadFile(): LicenseFile | null {
   try {
-    const parsed = JSON.parse(readFileSync(getLicensePath(), 'utf-8')) as LicenseFile
-    const { sig, ...rest } = parsed
-    // Reject missing or invalid signatures — file was tampered with
-    if (!sig || sig !== computeSig(rest)) return null
-    return rest
+    const parsed = JSON.parse(readFileSync(getLicensePath(), 'utf8')) as Record<string, unknown>
+    if (parsed.schemaVersion === 3) return unprotectLicense(parsed)
+    return migrateLegacyFile(parsed)
   } catch {
     return null
   }
 }
 
 function saveFile(data: LicenseFile): void {
-  const { sig: _discard, ...rest } = data
-  const sig = computeSig(rest)
-  writeFileSync(getLicensePath(), JSON.stringify({ ...rest, sig }, null, 2), 'utf-8')
+  const filePath = getLicensePath()
+  const tempPath = `${filePath}.tmp`
+  mkdirSync(path.dirname(filePath), { recursive: true })
+  try {
+    writeFileSync(tempPath, JSON.stringify(protectLicense(data), null, 2), { encoding: 'utf8', mode: 0o600 })
+    renameSync(tempPath, filePath)
+  } finally {
+    try { unlinkSync(tempPath) } catch { /* renamed or never written */ }
+  }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function maskKey(key: string): string {
   const parts = key.split('-')
-  if (parts.length >= 4) return `${parts[0]}-****-****-${parts[parts.length - 1]}`
-  return key.slice(0, 4) + '-****-' + key.slice(-4)
+  if (parts.length >= 4) return `${parts[0]}-****-****-${parts.at(-1)}`
+  return `${key.slice(0, 4)}-****-${key.slice(-4)}`
 }
 
-function withinGrace(lastValidated: string): boolean {
-  return Date.now() - new Date(lastValidated).getTime() < GRACE_PERIOD_DAYS * 86_400_000
+function activationInstanceName(): string {
+  const platform = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'desktop'
+  return `Nerion on ${platform}`
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+function detectLicenseKind(meta: LicenseMeta | undefined, licenseKey: LicenseKeyPayload | undefined): Exclude<LicenseKind, null> | null {
+  const variantId = meta?.variant_id ?? null
+  if (variantId !== null && MONTHLY_VARIANT_ID !== null && variantId === MONTHLY_VARIANT_ID) return 'monthly'
+  if (variantId !== null && LIFETIME_VARIANT_ID !== null && variantId === LIFETIME_VARIANT_ID) return 'lifetime'
+  if (meta?.subscription_id != null) return 'monthly'
 
-/** Returns current license state (reads from disk only — no network). */
-export function getLicenseInfo(): LicenseInfo {
-  const f = loadFile()
-  if (!f) return { active: false, licenseType: null, maskedKey: null, customerEmail: null, expiresAt: null, lastValidated: null }
+  const variantName = (meta?.variant_name ?? '').toLocaleLowerCase('en-US')
+  if (/month|annual|year|week|subscription/.test(variantName)) return 'monthly'
+  if (/lifetime|one[ -]?time|forever/.test(variantName)) return 'lifetime'
+  if (licenseKey?.expires_at) return 'monthly'
+  return null
+}
 
-  // Subscriptions: treat as expired once expiresAt passes + 2-day grace window.
-  // The buffer covers: being offline when renewal posts, clock skew, and the user
-  // renewing just before expiry but not yet having revalidated online.
-  // revalidateLicense() on next online startup refreshes expiresAt automatically.
-  const EXPIRY_GRACE_MS = 2 * 86_400_000  // 2 days
-  const subscriptionExpired =
-    f.licenseType === 'subscription' &&
-    f.expiresAt != null &&
-    new Date(f.expiresAt).getTime() + EXPIRY_GRACE_MS < Date.now()
+function resolvedServerStatus(valid: boolean, status: string): LicenseFile['status'] {
+  if (valid && status === 'active') return 'active'
+  if (status === 'expired' || status === 'disabled' || status === 'inactive') return status
+  // A confirmed `valid: false` response is authoritative even when the nested
+  // license-key record still carries its previous active status.
+  return 'inactive'
+}
 
-  const active = !subscriptionExpired && f.status === 'active' && withinGrace(f.lastValidated)
+function graceEndsAt(file: LicenseFile): string | null {
+  if (file.kind !== 'monthly') return null
+  const base = file.expiresAt ? new Date(file.expiresAt).getTime() : new Date(file.lastValidated).getTime()
+  if (!Number.isFinite(base)) return null
+  return new Date(base + MONTHLY_OFFLINE_GRACE_MS).toISOString()
+}
+
+function snapshot(file = loadFile()): LicenseSnapshot {
+  if (!file) {
+    return {
+      active: false,
+      kind: null,
+      state: 'free',
+      maskedKey: null,
+      customerEmail: null,
+      expiresAt: null,
+      graceEndsAt: null,
+      lastValidated: null,
+      validationError: null,
+      canManageBilling: false,
+      needsMonthlyCancellation: false,
+      message: null,
+      licenseType: null,
+    }
+  }
+
+  const explicitInactive = file.status !== 'active' || file.requiresOnlineValidation
+  const graceEnd = graceEndsAt(file)
+  const graceEndMs = graceEnd ? new Date(graceEnd).getTime() : 0
+  const expiresMs = file.expiresAt ? new Date(file.expiresAt).getTime() : 0
+  let active = false
+  let state: LicenseSnapshot['state']
+  let message: string | null = null
+
+  if (file.kind === 'lifetime') {
+    active = !explicitInactive
+    state = active ? 'lifetime-active' : 'free'
+    if (file.validationError && active) message = 'Could not refresh the license status; lifetime access remains available.'
+    if (file.requiresOnlineValidation) message = 'Connect to the internet to verify this license before paid features can be used.'
+  } else if (explicitInactive || (graceEndMs > 0 && Date.now() > graceEndMs)) {
+    state = 'monthly-expired'
+    message = file.requiresOnlineValidation
+      ? 'Connect to the internet to verify this license before paid features can be used.'
+      : 'The monthly license is expired or inactive.'
+  } else if (expiresMs > 0 && Date.now() > expiresMs) {
+    active = true
+    state = 'monthly-offline-grace'
+    message = `Offline grace ends ${graceEnd}. Connect to the internet to refresh the subscription.`
+  } else if (file.validationError) {
+    active = true
+    state = 'validation-unavailable'
+    message = 'The license server could not be reached. Cached monthly access is still active.'
+  } else {
+    active = true
+    state = 'monthly-active'
+  }
+
   return {
     active,
-    licenseType: f.licenseType,
-    maskedKey: maskKey(f.key),
-    customerEmail: f.customerEmail,
-    expiresAt: f.expiresAt,
-    lastValidated: f.lastValidated,
+    kind: file.kind,
+    state,
+    maskedKey: maskKey(file.key),
+    customerEmail: file.customerEmail,
+    expiresAt: file.expiresAt,
+    graceEndsAt: graceEnd,
+    lastValidated: file.lastValidated,
+    validationError: file.validationError,
+    canManageBilling: file.kind === 'monthly' || file.needsMonthlyCancellation,
+    needsMonthlyCancellation: file.needsMonthlyCancellation,
+    message,
+    licenseType: file.kind === 'monthly' ? 'subscription' : 'lifetime',
   }
 }
 
-/** Activate a new license key against the Lemon Squeezy API. */
-export async function activateLicense(rawKey: string): Promise<
-  { ok: true; info: LicenseInfo } | { ok: false; error: string }
-> {
-  const key = rawKey.trim().toUpperCase()
-  const instanceName = `${os.hostname()} – ${os.userInfo().username}`
+export const licenseTesting = {
+  activationInstanceName,
+  computeV2Sig,
+  detectLicenseKind,
+  migrateLegacyFile,
+  parseLicensePayload,
+  postForm,
+  protectLicense,
+  resolvedServerStatus,
+  snapshot,
+  unprotectLicense,
+}
 
+function publish(current = snapshot()): LicenseSnapshot {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.webContents.isDestroyed()) window.webContents.send('license:changed', current)
+  }
+  return current
+}
+
+async function postForm<T>(endpoint: string, fields: Record<string, string>): Promise<T> {
+  const response = await net.fetch(`${LS_API}/${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: new URLSearchParams(fields).toString(),
+  })
+  const text = await response.text()
+  let data: unknown
   try {
-    const res = await net.fetch(`${LS_API}/activate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ license_key: key, instance_name: instanceName }),
-    })
+    data = JSON.parse(text)
+  } catch {
+    throw new Error(`License server returned an invalid response (HTTP ${response.status}).`)
+  }
+  if (!response.ok) {
+    const error = (data as { error?: unknown })?.error
+    throw new Error(typeof error === 'string' ? error : `License request failed (HTTP ${response.status}).`)
+  }
+  if (!data || typeof data !== 'object') throw new Error('License server returned an invalid response.')
+  return data as T
+}
 
-    type ActivateResponse = {
-      activated?: boolean
-      error?: string
-      license_key?: { status: string; expires_at: string | null }
-      instance?: { id: string }
-      meta?: {
-        variant_id?: number | null
-        variant_name?: string
-        customer_email?: string
-        subscription_id?: number | null
-      }
-    }
-    const data = (await res.json()) as ActivateResponse
+export type LicenseInfo = LicenseSnapshot
 
-    if (!res.ok || !data.activated) {
-      return { ok: false, error: data.error ?? `Activation failed (HTTP ${res.status})` }
-    }
+export function getLicenseInfo(): LicenseSnapshot {
+  return snapshot()
+}
 
-    const licenseType = detectLicenseType(data.meta, data.license_key)
-
-    const file: LicenseFile = {
-      key,
-      instanceId: data.instance!.id,
-      licenseType,
-      status: data.license_key?.status === 'active' ? 'active' : 'inactive',
-      customerEmail: data.meta?.customer_email ?? null,
-      expiresAt: data.license_key?.expires_at ?? null,
-      lastValidated: new Date().toISOString(),
-    }
-    saveFile(file)
-    return { ok: true, info: getLicenseInfo() }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : 'Network error — check your internet connection' }
+async function releaseActivationSlot(key: string, instanceId: string): Promise<void> {
+  try {
+    await postForm('deactivate', { license_key: key, instance_id: instanceId })
+  } catch {
+    // This is compensation for an activation that cannot be committed locally.
+    // The original, still-valid entitlement remains untouched either way.
   }
 }
 
-/** Re-validate existing license against the server. Falls back to cached state on network error. */
-export async function revalidateLicense(): Promise<LicenseInfo> {
-  const f = loadFile()
-  if (!f) return getLicenseInfo()
+export async function activateLicense(rawKey: string): Promise<{ ok: true; info: LicenseSnapshot } | { ok: false; error: string }> {
+  const key = rawKey.trim()
+  if (!key) return { ok: false, error: 'Enter a license key.' }
+  const existing = loadFile()
+  const existingActive = existing ? snapshot(existing).active : false
 
   try {
-    const res = await net.fetch(`${LS_API}/validate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ license_key: f.key, instance_id: f.instanceId }),
+    const data = await postForm<ActivateResponse>('activate', {
+      license_key: key,
+      instance_name: activationInstanceName(),
     })
-
-    type ValidateResponse = {
-      valid?: boolean
-      license_key?: { status: string; expires_at: string | null }
-      meta?: { variant_id?: number | null; variant_name?: string; subscription_id?: number | null }
+    if (data.activated !== true || typeof data.instance?.id !== 'string' || !data.instance.id) {
+      return { ok: false, error: data.error ?? 'The license could not be activated.' }
     }
-    const data = (await res.json()) as ValidateResponse
+    const status = data.license_key?.status
+    if (!status || !['active', 'inactive', 'expired', 'disabled'].includes(status)) {
+      return { ok: false, error: 'The license server omitted the license status.' }
+    }
+    const kind = detectLicenseKind(data.meta, data.license_key)
+    if (!kind) {
+      await releaseActivationSlot(key, data.instance.id)
+      return { ok: false, error: 'The license plan could not be identified. Check the configured Lemon Squeezy variant IDs.' }
+    }
+    if (status !== 'active') {
+      await releaseActivationSlot(key, data.instance.id)
+      return { ok: false, error: `This license is ${status} and cannot be activated.` }
+    }
+    if (existingActive && existing?.kind === 'lifetime') {
+      await releaseActivationSlot(key, data.instance.id)
+      return { ok: false, error: 'Deactivate the current Lifetime license before activating a different key.' }
+    }
+    if (existingActive && existing?.kind === 'monthly' && kind !== 'lifetime') {
+      await releaseActivationSlot(key, data.instance.id)
+      return { ok: false, error: 'Only an active Lifetime license can replace the current monthly license.' }
+    }
 
-    // Use the same priority chain as activateLicense.
-    // If no signal fires (e.g. no variant IDs configured and all other fields null),
-    // keep the cached licenseType so we don't accidentally downgrade a subscription.
-    const detectedType = detectLicenseType(data.meta, data.license_key)
-    const licenseType: 'subscription' | 'lifetime' =
-      detectedType === 'subscription' ? 'subscription' : f.licenseType
+    const now = new Date().toISOString()
+    try {
+      saveFile({
+        schemaVersion: 3,
+        key,
+        instanceId: data.instance.id,
+        kind,
+        status,
+        customerEmail: data.meta?.customer_email ?? null,
+        expiresAt: data.license_key?.expires_at ?? null,
+        lastValidated: now,
+        lastValidationAttempt: now,
+        validationError: null,
+        needsMonthlyCancellation: kind === 'lifetime' && existing?.kind === 'monthly' && existingActive,
+        requiresOnlineValidation: false,
+      })
+    } catch (error) {
+      await releaseActivationSlot(key, data.instance.id)
+      throw error
+    }
+    return { ok: true, info: publish() }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : 'Could not reach the license server.' }
+  }
+}
 
+async function performRevalidation(force: boolean): Promise<LicenseSnapshot> {
+  const file = loadFile()
+  if (!file) return snapshot(null)
+  const lastAttemptMs = new Date(file.lastValidationAttempt).getTime()
+  if (!force && !file.requiresOnlineValidation && Number.isFinite(lastAttemptMs) && Date.now() - lastAttemptMs < VALIDATION_INTERVAL_MS) return snapshot(file)
+
+  const attemptTime = new Date().toISOString()
+  try {
+    const data = await postForm<ValidateResponse>('validate', {
+      license_key: file.key,
+      instance_id: file.instanceId,
+    })
+    if (typeof data.valid !== 'boolean' || !data.license_key || typeof data.license_key.status !== 'string') {
+      throw new Error('License server returned an incomplete validation response.')
+    }
+    const status = data.license_key.status
+    if (!['active', 'inactive', 'expired', 'disabled'].includes(status)) throw new Error('License server returned an unknown license status.')
+    const detectedKind = detectLicenseKind(data.meta, data.license_key)
+    const resolvedStatus = resolvedServerStatus(data.valid, status)
+    if (file.requiresOnlineValidation && resolvedStatus === 'active' && !detectedKind) {
+      throw new Error('The license server did not identify the migrated license plan.')
+    }
     const updated: LicenseFile = {
-      ...f,
-      status: data.valid && data.license_key?.status === 'active' ? 'active' : 'inactive',
-      licenseType,
-      expiresAt: data.license_key?.expires_at ?? f.expiresAt,
-      lastValidated: new Date().toISOString(),
+      ...file,
+      kind: detectedKind ?? file.kind,
+      status: resolvedStatus,
+      customerEmail: data.meta?.customer_email ?? file.customerEmail,
+      expiresAt: data.license_key.expires_at ?? file.expiresAt,
+      lastValidated: attemptTime,
+      lastValidationAttempt: attemptTime,
+      validationError: null,
+      requiresOnlineValidation: false,
     }
     saveFile(updated)
-  } catch {
-    // Network error — grace period still applies to the existing file
+  } catch (error) {
+    saveFile({
+      ...file,
+      lastValidationAttempt: attemptTime,
+      validationError: error instanceof Error ? error.message : 'License validation is unavailable.',
+    })
   }
-
-  return getLicenseInfo()
+  return publish()
 }
 
-/** Deactivate license on the server then remove local file. */
-export async function deactivateLicense(): Promise<void> {
-  const f = loadFile()
-  if (f) {
+export function revalidateLicense(force = false): Promise<LicenseSnapshot> {
+  if (revalidationInFlight) return revalidationInFlight
+  revalidationInFlight = performRevalidation(force).finally(() => { revalidationInFlight = null })
+  return revalidationInFlight
+}
+
+export function startLicenseValidationService(): void {
+  revalidateLicense().catch(() => {})
+  if (validationPollTimer) return
+  // Poll cheaply so a cached validation that was already 23 hours old at
+  // startup is refreshed near its true 24-hour boundary, not a day later.
+  validationPollTimer = setInterval(() => {
+    revalidateLicense().catch(() => {})
+  }, 60 * 60 * 1000)
+  validationPollTimer.unref()
+}
+
+export async function deactivateLicense(): Promise<LicenseSnapshot> {
+  const file = loadFile()
+  if (file) {
     try {
-      await net.fetch(`${LS_API}/deactivate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ license_key: f.key, instance_id: f.instanceId }),
-      })
-    } catch { /* best-effort */ }
+      await postForm('deactivate', { license_key: file.key, instance_id: file.instanceId })
+    } catch {
+      // Local deactivation is explicit; remote slot cleanup remains best effort.
+    }
   }
-  try { unlinkSync(getLicensePath()) } catch { /* already gone */ }
+  try { unlinkSync(getLicensePath()) } catch { /* already removed */ }
+  return publish(snapshot(null))
 }
