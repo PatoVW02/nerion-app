@@ -81,6 +81,14 @@ export interface ScanSummaryV1 {
 
 export type ScanEventV1 = ScanEntryV1 | ScanIssueV1 | ScanSuspiciousV1 | ScanSummaryV1
 
+export type BackgroundScanRunOutcome =
+  | 'completed'
+  | 'deferred'
+  | 'cancelled'
+  | 'disabled'
+  | 'failed'
+  | 'no-targets'
+
 export type DeleteItemStatus =
   | 'moved-to-trash'
   | 'permanently-removed'
@@ -189,4 +197,6 @@ export interface PlatformAppearance {
 
 export interface AiCapabilities {
   cloudAvailable: boolean
+  cloudSource: 'runtime' | 'user' | null
+  cloudConfigurable: boolean
 }

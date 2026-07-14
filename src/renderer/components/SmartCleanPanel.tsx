@@ -462,7 +462,10 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo, disabled }: Le
         onContextMenu={(e) => { e.preventDefault(); setCtx({ x: e.clientX, y: e.clientY }) }}
       >
         <button
-          onClick={disabled ? undefined : onToggle}
+          type="button"
+          onClick={onToggle}
+          disabled={disabled}
+          aria-label={`${checked ? 'Deselect' : 'Select'} ${item.name}`}
           className={[
             'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
             disabled
@@ -479,7 +482,7 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo, disabled }: Le
 
         {isDir ? <FolderIcon /> : <FileIcon />}
 
-        <button onClick={disabled ? undefined : onToggle} className="flex-1 min-w-0 text-left">
+        <button type="button" onClick={onToggle} disabled={disabled} className="flex-1 min-w-0 text-left disabled:cursor-default">
           <div className="flex items-center justify-between gap-1">
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="text-xs font-medium text-zinc-200 truncate">{item.name}</span>
@@ -503,7 +506,7 @@ function LeftoverRow({ item, checked, onToggle, onReveal, onInfo, disabled }: Le
         <ItemCtxMenu
           x={ctx.x}
           y={ctx.y}
-          canSelect={!isCriticalPath(item.path) || isContentOnlyProtectedRoot(item.path)}
+          canSelect={!disabled && (!isCriticalPath(item.path) || isContentOnlyProtectedRoot(item.path))}
           isSelected={checked}
           onToggle={() => { onToggle(); setCtx(null) }}
           onInfo={() => { onInfo(asDiskEntry); setCtx(null) }}
@@ -698,7 +701,9 @@ export function SmartCleanPanel({
           setSelectedLeftovers(new Set())
         } else {
           // Restore previous selection, keeping only paths that still exist
-          const existing = new Set(filteredItems.map((i) => i.path))
+          const existing = new Set(filteredItems
+            .filter((item) => item.confidence === 'recommended')
+            .map((item) => item.path))
           setSelectedLeftovers(new Set([...initialLeftoverSelection].filter((p) => existing.has(p))))
         }
       })
@@ -870,6 +875,10 @@ export function SmartCleanPanel({
     () => [...systemEntries, ...systemChildEntries, ...devEntries],
     [systemEntries, systemChildEntries, devEntries]
   )
+  const selectableLeftovers = useMemo(
+    () => leftovers.filter((item) => item.confidence === 'recommended'),
+    [leftovers],
+  )
 
   const { totalSelectedKB, totalSelectedCount } = useMemo(() => {
     let kb = 0, count = 0
@@ -885,9 +894,9 @@ export function SmartCleanPanel({
   const { totalAvailableKB, totalAvailableCount } = useMemo(() => {
     let kb = 0, count = 0
     for (const e of allEntries) { kb += e.sizeKB; count++ }
-    for (const l of leftovers)  { kb += l.sizeKB; count++ }
+    for (const l of selectableLeftovers)  { kb += l.sizeKB; count++ }
     return { totalAvailableKB: kb, totalAvailableCount: count }
-  }, [allEntries, leftovers])
+  }, [allEntries, selectableLeftovers])
 
   // Per-section "all selected" state
   const allSystemSelected = useMemo(
@@ -903,9 +912,12 @@ export function SmartCleanPanel({
     [allEntries, selectedScanPaths]
   )
   const allLeftoversSelected = useMemo(
-    () => leftovers.length > 0 && leftovers.every(l => selectedLeftovers.has(l.path)),
-    [leftovers, selectedLeftovers]
+    () => selectableLeftovers.length > 0 && selectableLeftovers.every(l => selectedLeftovers.has(l.path)),
+    [selectableLeftovers, selectedLeftovers]
   )
+  const allCleanupSelected = (allEntries.length === 0 || allScanSelected)
+    && (selectableLeftovers.length === 0 || allLeftoversSelected)
+    && (allEntries.length + selectableLeftovers.length > 0)
   const allSuspiciousSelected = useMemo(
     () => visibleSuspicious.length > 0 && visibleSuspicious.every((finding) => selectedSuspicious.has(finding.path)),
     [visibleSuspicious, selectedSuspicious],
@@ -1030,17 +1042,17 @@ export function SmartCleanPanel({
           {isPremium ? (
             <button
               onClick={() => {
-                if (allScanSelected && allLeftoversSelected) {
+                if (allCleanupSelected) {
                   setSelectedScanPaths(new Set())
                   setSelectedLeftovers(new Set())
                 } else {
                   setSelectedScanPaths(new Set(allEntries.map(e => e.path)))
-                  setSelectedLeftovers(new Set(leftovers.map(l => l.path)))
+                  setSelectedLeftovers(new Set(selectableLeftovers.map(l => l.path)))
                 }
               }}
               className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
             >
-              {(allScanSelected && allLeftoversSelected) ? 'Deselect Cleanup' : 'Select Cleanup'}
+              {allCleanupSelected ? 'Deselect Cleanup' : 'Select Cleanup'}
             </button>
           ) : (
             <span className="flex items-center gap-1 text-xs text-zinc-600">
@@ -1178,10 +1190,10 @@ export function SmartCleanPanel({
           title="App Leftovers"
           collapsed={leftoversCollapsed}
           onToggleCollapse={() => setLeftoversCollapsed(v => !v)}
-          selectLabel={isPremium && !leftoversLoading && leftovers.length > 0 ? (allLeftoversSelected ? 'Deselect' : 'Select all') : undefined}
-          onSelect={isPremium && !leftoversLoading && leftovers.length > 0 ? () => {
+          selectLabel={isPremium && !leftoversLoading && selectableLeftovers.length > 0 ? (allLeftoversSelected ? 'Deselect' : 'Select recommended') : undefined}
+          onSelect={isPremium && !leftoversLoading && selectableLeftovers.length > 0 ? () => {
             if (allLeftoversSelected) setSelectedLeftovers(new Set())
-            else setSelectedLeftovers(new Set(leftovers.map((l) => l.path)))
+            else setSelectedLeftovers(new Set(selectableLeftovers.map((l) => l.path)))
           } : undefined}
         >
           {leftoversLoading ? (
@@ -1215,7 +1227,7 @@ export function SmartCleanPanel({
                   onToggle={() => toggleLeftover(item.path)}
                   onReveal={() => window.electronAPI.revealInFileManager(item.path)}
                   onInfo={onInfo}
-                  disabled={!isPremium}
+                  disabled={!isPremium || item.confidence !== 'recommended'}
                 />
               ))}
             </>

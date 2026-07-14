@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { AiCapabilities, NerionSettings, OllamaModel, LicenseInfo, PlatformInfo, UpdaterStatusEvent } from '../types'
 import { formatSize } from '../utils/format'
@@ -156,6 +156,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
   const [settings, setSettings] = useState<NerionSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [scanningNow, setScanningNow] = useState(false)
+  const [backgroundRunMessage, setBackgroundRunMessage] = useState<string | null>(null)
   const [checkingForUpdates, setCheckingForUpdates] = useState(false)
   const [updateMessage, setUpdateMessage] = useState<string | null>(null)
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null)
@@ -177,7 +178,10 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
   // AI state
   const [aiEnabled, setAiEnabled] = useState(() => localStorage.getItem('nerion:aiHidden') !== 'true')
   const [aiMode, setAiMode] = useState<'cloud' | 'ollama'>('ollama')
-  const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false })
+  const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false, cloudSource: null, cloudConfigurable: false })
+  const [cloudApiKey, setCloudApiKey] = useState('')
+  const [cloudCredentialBusy, setCloudCredentialBusy] = useState(false)
+  const [cloudCredentialError, setCloudCredentialError] = useState<string | null>(null)
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('idle')
   const [installedModels, setInstalledModels] = useState<OllamaModel[]>([])
   const [pullingModel, setPullingModel] = useState<string | null>(null)
@@ -443,10 +447,16 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
 
   async function scanNow() {
     setScanningNow(true)
+    setBackgroundRunMessage(null)
     try {
-      await window.electronAPI.runBgScanNow()
+      const outcome = await window.electronAPI.runBgScanNow()
       const updated = await window.electronAPI.getSettings()
       setSettings(updated)
+      if (outcome === 'deferred') setBackgroundRunMessage('A foreground or background scan is already running.')
+      else if (outcome === 'cancelled') setBackgroundRunMessage('The scan was interrupted and will be retried later.')
+      else if (outcome === 'disabled') setBackgroundRunMessage('A paid license is required for background scanning.')
+    } catch {
+      setBackgroundRunMessage('The background scan could not be started.')
     } finally {
       setScanningNow(false)
     }
@@ -537,6 +547,43 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     // When switching to Ollama, kick off a status check if AI is enabled
     if (effectiveMode === 'ollama' && aiEnabled) checkOllama()
     else setOllamaStatus('idle')
+  }
+
+  async function connectCloudAi(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const apiKey = cloudApiKey.trim()
+    if (!apiKey) {
+      setCloudCredentialError('Enter an OpenAI API key.')
+      return
+    }
+    setCloudApiKey('')
+    setCloudCredentialBusy(true)
+    setCloudCredentialError(null)
+    try {
+      const capabilities = await window.electronAPI.configureCloudAi(apiKey)
+      setAiCapabilities(capabilities)
+      setAiMode('cloud')
+      setOllamaStatus('idle')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The OpenAI key could not be verified.'
+      setCloudCredentialError(message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, ''))
+    } finally {
+      setCloudCredentialBusy(false)
+    }
+  }
+
+  async function disconnectCloudAi() {
+    setCloudCredentialBusy(true)
+    setCloudCredentialError(null)
+    try {
+      const capabilities = await window.electronAPI.removeCloudAiCredential()
+      setAiCapabilities(capabilities)
+      if (!capabilities.cloudAvailable) setAiMode('ollama')
+    } catch {
+      setCloudCredentialError('The stored OpenAI key could not be removed.')
+    } finally {
+      setCloudCredentialBusy(false)
+    }
   }
 
   async function setActiveModel(modelName: string) {
@@ -748,6 +795,11 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                       : totalKB > 0 ? `Found ${formatSize(totalKB)} cleanable` : 'Nothing found'}
                   </p>
                 )}
+                {backgroundRunMessage && (
+                  <p role="status" className="text-xs mt-0.5 text-amber-400/80">
+                    {backgroundRunMessage}
+                  </p>
+                )}
               </div>
               <button
                 onClick={scanNow}
@@ -790,28 +842,36 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
               <div className="px-4 py-4 flex flex-col gap-2">
                 <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-1">AI Provider</p>
                 <div className="flex gap-2">
-                  {/* Cloud is only exposed for internal builds configured at runtime. */}
-                  {aiCapabilities.cloudAvailable && (
-                    <button
-                      onClick={() => handleAiModeChange('cloud')}
-                      className={[
-                        'flex-1 flex flex-col items-start gap-1 px-3 py-3 rounded-xl border transition-all text-left',
-                        aiMode === 'cloud'
+                  <button
+                    onClick={() => handleAiModeChange('cloud')}
+                    disabled={!aiCapabilities.cloudAvailable}
+                    aria-describedby={!aiCapabilities.cloudAvailable ? 'cloud-ai-status' : undefined}
+                    className={[
+                      'flex-1 flex flex-col items-start gap-1 px-3 py-3 rounded-xl border transition-all text-left',
+                      !aiCapabilities.cloudAvailable
+                        ? 'border-white/[0.05] bg-white/[0.015] opacity-60 cursor-not-allowed'
+                        : aiMode === 'cloud'
                           ? 'border-blue-500/40 bg-blue-600/10'
                           : 'border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04]'
-                      ].join(' ')}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <div className={['w-1.5 h-1.5 rounded-full shrink-0', aiMode === 'cloud' ? 'bg-blue-400' : 'bg-zinc-600'].join(' ')} />
-                        <span className={['text-xs font-semibold', aiMode === 'cloud' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
-                          Cloud AI
+                    ].join(' ')}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <div className={['w-1.5 h-1.5 rounded-full shrink-0', aiMode === 'cloud' ? 'bg-blue-400' : 'bg-zinc-600'].join(' ')} />
+                      <span className={['text-xs font-semibold', aiMode === 'cloud' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
+                        OpenAI (cloud)
+                      </span>
+                      {!aiCapabilities.cloudAvailable && (
+                        <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-semibold bg-white/[0.06] text-zinc-500 uppercase tracking-wide">
+                          Setup needed
                         </span>
-                      </div>
-                      <p className="text-[11px] text-zinc-600 leading-snug">
-                        Runtime-configured OpenAI service
-                      </p>
-                    </button>
-                  )}
+                      )}
+                    </div>
+                    <p id={!aiCapabilities.cloudAvailable ? 'cloud-ai-status' : undefined} className="text-[11px] text-zinc-600 leading-snug">
+                      {aiCapabilities.cloudAvailable
+                        ? aiCapabilities.cloudSource === 'user' ? 'Your encrypted OpenAI key' : 'Online analysis through Nerion'
+                        : 'Connect your OpenAI API key below'}
+                    </p>
+                  </button>
 
                   {/* Local Ollama option */}
                   <button
@@ -839,6 +899,70 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                     </p>
                   </button>
                 </div>
+
+                {aiCapabilities.cloudSource !== 'runtime' && (
+                  <div className="mt-1 rounded-lg border border-white/[0.06] bg-black/10 p-3">
+                    {aiCapabilities.cloudSource === 'user' ? (
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-zinc-300">OpenAI key connected</p>
+                          <p className="mt-0.5 text-[10px] leading-relaxed text-zinc-600">
+                            Protected by your operating system. API usage is billed to your OpenAI account.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={disconnectCloudAi}
+                          disabled={cloudCredentialBusy}
+                          className="shrink-0 rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 disabled:opacity-50"
+                        >
+                          Remove key
+                        </button>
+                      </div>
+                    ) : aiCapabilities.cloudConfigurable ? (
+                      <form onSubmit={connectCloudAi} className="flex flex-col gap-2">
+                        <div className="flex gap-2">
+                          <label htmlFor="openai-api-key" className="sr-only">OpenAI API key</label>
+                          <input
+                            id="openai-api-key"
+                            type="password"
+                            value={cloudApiKey}
+                            onChange={(event) => setCloudApiKey(event.target.value)}
+                            placeholder="sk-proj-…"
+                            autoComplete="off"
+                            spellCheck={false}
+                            disabled={cloudCredentialBusy}
+                            className="min-w-0 flex-1 rounded-md border border-white/[0.08] bg-black/20 px-2.5 py-1.5 font-mono text-[11px] text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-blue-500/40 disabled:opacity-50"
+                          />
+                          <button
+                            type="submit"
+                            disabled={cloudCredentialBusy || cloudApiKey.trim().length === 0}
+                            className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-[10px] font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {cloudCredentialBusy ? 'Verifying…' : 'Connect'}
+                          </button>
+                        </div>
+                        <p className="text-[10px] leading-relaxed text-zinc-600">
+                          Only the selected item's name, path, type, and size are sent to OpenAI; file contents are never uploaded.{' '}
+                          <button
+                            type="button"
+                            onClick={() => window.electronAPI.openExternal('https://platform.openai.com/api-keys')}
+                            className="text-blue-400/80 hover:text-blue-300"
+                          >
+                            Create a key
+                          </button>
+                        </p>
+                      </form>
+                    ) : (
+                      <p className="text-[10px] leading-relaxed text-amber-300/70">
+                        Secure credential storage is unavailable on this device, so OpenAI cannot be configured safely.
+                      </p>
+                    )}
+                    {cloudCredentialError && (
+                      <p role="alert" className="mt-2 text-[10px] leading-relaxed text-red-300/80">{cloudCredentialError}</p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

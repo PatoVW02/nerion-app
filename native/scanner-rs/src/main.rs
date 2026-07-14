@@ -3,6 +3,8 @@ use std::env;
 use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -17,8 +19,48 @@ use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Storage::FileSystem::{
     GetCompressedFileSizeW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS,
+};
 
 const PROTOCOL_VERSION: u8 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScanProfile {
+    Interactive,
+    Background,
+}
+
+impl ScanProfile {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("background") => Self::Background,
+            _ => Self::Interactive,
+        }
+    }
+
+    fn yield_policy(self) -> (u64, Duration) {
+        match self {
+            Self::Interactive => (128, Duration::from_millis(1)),
+            Self::Background => (64, Duration::from_millis(2)),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn apply_process_priority(profile: ScanProfile) {
+    let priority = match profile {
+        ScanProfile::Interactive => BELOW_NORMAL_PRIORITY_CLASS,
+        ScanProfile::Background => IDLE_PRIORITY_CLASS,
+    };
+    unsafe {
+        SetPriorityClass(GetCurrentProcess(), priority);
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_process_priority(_profile: ScanProfile) {}
 
 struct ScanContext<'a, W: Write> {
     scan_id: &'a str,
@@ -27,6 +69,7 @@ struct ScanContext<'a, W: Write> {
     seen_hardlinks: HashSet<(u64, u64)>,
     entry_count: u64,
     issue_count: u64,
+    profile: ScanProfile,
 }
 
 fn json_string(value: &str) -> String {
@@ -133,6 +176,10 @@ impl<W: Write> ScanContext<'_, W> {
         self.entry_count += 1;
         if self.entry_count.is_multiple_of(128) {
             let _ = self.writer.flush();
+        }
+        let (yield_every, duration) = self.profile.yield_policy();
+        if self.entry_count.is_multiple_of(yield_every) {
+            thread::sleep(duration);
         }
     }
 
@@ -312,6 +359,8 @@ fn main() {
         .next()
         .and_then(|value| value.into_string().ok())
         .unwrap_or_else(|| "root-0".to_string());
+    let profile = ScanProfile::parse(args.next().as_deref().and_then(|value| value.to_str()));
+    apply_process_priority(profile);
 
     let stdout = io::stdout();
     let mut context = ScanContext {
@@ -321,6 +370,7 @@ fn main() {
         seen_hardlinks: HashSet::new(),
         entry_count: 0,
         issue_count: 0,
+        profile,
     };
 
     if target.to_str().is_none() {
@@ -403,6 +453,7 @@ mod tests {
             seen_hardlinks: HashSet::new(),
             entry_count: 0,
             issue_count: 0,
+            profile: ScanProfile::Interactive,
         };
         let root_path = root.to_str().expect("valid root path");
 
@@ -438,6 +489,19 @@ mod tests {
         assert!(
             !output.contains('�'),
             "a lossy replacement path must never be emitted"
+        );
+    }
+
+    #[test]
+    fn scan_profiles_default_to_interactive_and_accept_background() {
+        assert_eq!(ScanProfile::parse(None), ScanProfile::Interactive);
+        assert_eq!(
+            ScanProfile::parse(Some("unknown")),
+            ScanProfile::Interactive
+        );
+        assert_eq!(
+            ScanProfile::parse(Some("background")),
+            ScanProfile::Background
         );
     }
 }

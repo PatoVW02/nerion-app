@@ -7,18 +7,21 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { scanDirectoryStreaming } from './scanner'
 import { loadSettings, saveSettings, patchSettings, NerionSettings } from './settings'
-import { rebuildTrayMenu, scheduleBackgroundScan, stopBackgroundScan, runBackgroundScan, updateLastScanPath, setTrayVisibility, setQuitting, testNotification } from './background'
+import { rebuildTrayMenu, scheduleBackgroundScan, stopBackgroundScan, runBackgroundScanNow, updateLastScanPath, setTrayVisibility, setQuitting, testNotification } from './background'
 import { getLicenseInfo, activateLicense, startLicenseValidationService, deactivateLicense } from './license'
 import { runAutoUpdateCheck, installDownloadedUpdateNow, isUpdateReadyToInstall } from './updater'
 import { getPlatformAppearance, getPlatformMeta, revealInFileManager, supportsFullDiskAccess } from './platform'
-import { SCAN_PROTOCOL_VERSION, type DeleteBatchResult, type LeftoverScanResult, type ScanEntryV1, type ScanIssueV1, type ScanSummaryV1, type ScanSuspiciousV1, type SuspiciousFinding } from '../shared/contracts'
+import { SCAN_PROTOCOL_VERSION, type DeleteBatchResult, type LeftoverScanResult, type ScanEntryV1, type ScanEventV1, type ScanIssueV1, type ScanSummaryV1, type ScanSuspiciousV1, type SuspiciousFinding } from '../shared/contracts'
 import { collapseOverlappingPaths, isSameOrDescendantPath } from '../shared/path-utils'
 import { deleteRequestedPaths } from './deletion'
 import { findAppLeftovers } from './leftovers'
 import { inspectMasqueradingEntry, inspectSuspiciousPersistence } from './suspicious'
 import { getAiCapabilities, getCloudAiConfig, normalizeAiMode } from './ai-config'
+import { canConfigureCloudAi, loadCloudAiKey, OPENAI_MODEL, removeCloudAiKey, validateAndSaveCloudAiKey } from './cloud-ai'
 import { isAllowedExternalUrl } from './security'
 import { isValidIpcPath, normalizeNonNegativeKilobytes, normalizeRendererSettings, parseOllamaPullRecord } from './runtime-policy'
+import { beginForegroundScan, endForegroundScan } from './scan-coordination'
+import { createBufferedEventSender } from './scan-event-buffer'
 
 const execFileAsync = promisify(execFile)
 
@@ -888,10 +891,14 @@ export function registerIpcHandlers(): void {
     )
     const securityEnabled = getLicenseInfo().active
     currentScanId = requestedScanId
+    beginForegroundScan(requestedScanId)
 
-    const send = (data: unknown) => {
-      if (currentScanId === requestedScanId && !event.sender.isDestroyed()) event.sender.send('scan-event', data)
-    }
+    const dispatcher = createBufferedEventSender<ScanEventV1>((events) => {
+      if (currentScanId === requestedScanId && !event.sender.isDestroyed()) {
+        event.sender.send('scan-events', events)
+      }
+    })
+    const send = (data: ScanEventV1) => dispatcher.enqueue(data)
 
     if (paths.length === 0) {
       send({
@@ -909,11 +916,12 @@ export function registerIpcHandlers(): void {
         securityAnalysis: securityEnabled ? 'partial' : 'disabled',
         suspiciousCount: 0,
       } satisfies ScanSummaryV1)
+      dispatcher.dispose(true)
+      endForegroundScan(requestedScanId)
       currentScanId = null
       return
     }
 
-    const cancellers: Array<() => void> = []
     const summaries: ScanSummaryV1[] = []
     const seenHardlinks = new Set<string>()
     const crossRootDuplicateBytes = new Map<string, Array<{ path: string; bytes: number }>>()
@@ -925,7 +933,7 @@ export function registerIpcHandlers(): void {
           inaccessiblePaths: [] as string[],
         }))
       : Promise.resolve({ findings: [] as SuspiciousFinding[], complete: true, inaccessiblePaths: [] as string[] })
-    let completed = 0
+    let activeCancel: (() => void) | null = null
 
     const sendSuspiciousFinding = (finding: SuspiciousFinding, rootId: string) => {
       if (!securityEnabled) return
@@ -954,12 +962,49 @@ export function registerIpcHandlers(): void {
       } satisfies ScanSuspiciousV1)
     }
 
-    paths.forEach((dirPath, index) => {
+    const finishScan = async () => {
+      const persistence = await persistenceInspection
+      if (currentScanId !== requestedScanId) return
+      for (const finding of persistence.findings) sendSuspiciousFinding(finding, 'security-persistence')
+
+      const fatalErrors = summaries.map((item) => item.fatalError).filter((value): value is string => !!value)
+      const scanComplete = summaries.every((item) => item.complete)
+      send({
+        protocolVersion: SCAN_PROTOCOL_VERSION,
+        event: 'summary',
+        scanId: requestedScanId,
+        rootId: null,
+        complete: scanComplete,
+        cancelled: summaries.some((item) => item.cancelled),
+        entryCount: summaries.reduce((total, item) => total + item.entryCount, 0),
+        issueCount: summaries.reduce((total, item) => total + item.issueCount, 0),
+        rootsCompleted: summaries.filter((item) => !item.fatalError).length,
+        rootsRequested: paths.length,
+        fatalError: fatalErrors.length === paths.length ? fatalErrors[0] : null,
+        securityAnalysis: securityEnabled
+          ? (persistence.complete && scanComplete ? 'complete' : 'partial')
+          : 'disabled',
+        suspiciousCount: suspiciousFindings.size,
+      } satisfies ScanSummaryV1)
+      dispatcher.dispose(true)
+      cancelCurrentScan = null
+      endForegroundScan(requestedScanId)
+      currentScanId = null
+    }
+
+    const scanNextRoot = (index: number) => {
+      if (currentScanId !== requestedScanId) return
+      if (index >= paths.length) {
+        void finishScan()
+        return
+      }
+
+      const dirPath = paths[index]
       const rootId = `root-${index}`
       crossRootDuplicateBytes.set(rootId, [])
-      cancellers.push(scanDirectoryStreaming(
+      activeCancel = scanDirectoryStreaming(
         dirPath,
-        { scanId: requestedScanId, rootId },
+        { scanId: requestedScanId, rootId, profile: 'interactive' },
         (scanEvent) => {
           if (scanEvent.event === 'entry' && securityEnabled) {
             const finding = inspectMasqueradingEntry(scanEvent as ScanEntryV1, platform)
@@ -988,6 +1033,7 @@ export function registerIpcHandlers(): void {
         },
         ({ summary }) => {
           if (currentScanId !== requestedScanId) return
+          activeCancel = null
           // Root-level scanner failures have no native issue event. Surface
           // them alongside ordinary inaccessible paths so one failed root is
           // not hidden merely because another root completed successfully.
@@ -1008,45 +1054,20 @@ export function registerIpcHandlers(): void {
             } satisfies ScanIssueV1)
           }
           summaries.push(finalSummary)
-          completed += 1
-          if (completed !== paths.length) return
-
-          cancelCurrentScan = null
-          void (async () => {
-            const persistence = await persistenceInspection
-            if (currentScanId !== requestedScanId) return
-            for (const finding of persistence.findings) sendSuspiciousFinding(finding, 'security-persistence')
-
-            const fatalErrors = summaries.map((item) => item.fatalError).filter((value): value is string => !!value)
-            const scanComplete = summaries.every((item) => item.complete)
-            send({
-              protocolVersion: SCAN_PROTOCOL_VERSION,
-              event: 'summary',
-              scanId: requestedScanId,
-              rootId: null,
-              complete: scanComplete,
-              cancelled: summaries.some((item) => item.cancelled),
-              entryCount: summaries.reduce((total, item) => total + item.entryCount, 0),
-              issueCount: summaries.reduce((total, item) => total + item.issueCount, 0),
-              rootsCompleted: summaries.filter((item) => !item.fatalError).length,
-              rootsRequested: paths.length,
-              fatalError: fatalErrors.length === paths.length ? fatalErrors[0] : null,
-              securityAnalysis: securityEnabled
-                ? (persistence.complete && scanComplete ? 'complete' : 'partial')
-                : 'disabled',
-              suspiciousCount: suspiciousFindings.size,
-            } satisfies ScanSummaryV1)
-            currentScanId = null
-          })()
+          scanNextRoot(index + 1)
         },
-      ))
-    })
+      )
+    }
 
     cancelCurrentScan = () => {
       currentScanId = null
-      cancellers.forEach((cancel) => cancel())
+      dispatcher.dispose()
+      activeCancel?.()
+      activeCancel = null
+      endForegroundScan(requestedScanId)
       cancelCurrentScan = null
     }
+    scanNextRoot(0)
   })
 
   ipcMain.on('scan-cancel', () => {
@@ -1157,9 +1178,13 @@ export function registerIpcHandlers(): void {
 
   // ── AI Analysis (Cloud or Ollama) ─────────────────────────────────────────
 
-  // Cloud AI is an internal/runtime-configured capability. Credentials must
-  // never use VITE_* variables because those are embedded in packaged output.
-  const cloudAiConfig = getCloudAiConfig()
+  // Runtime credentials support managed/internal deployments. Public builds
+  // can instead use a user-provided key protected by the operating system.
+  const currentAiCapabilities = () => getAiCapabilities(
+    process.env,
+    loadCloudAiKey() !== null,
+    canConfigureCloudAi(),
+  )
 
   /** Stream an OpenAI Responses API SSE response and emit ollama-token / ollama-done events. */
   async function streamResponsesAPI(
@@ -1299,41 +1324,51 @@ What is this item and is it safe to delete?`
       }
 
       try {
-        const aiMode = normalizeAiMode(loadSettings().aiMode)
+        const aiMode = normalizeAiMode(loadSettings().aiMode, process.env, loadCloudAiKey() !== null)
 
         if (aiMode === 'cloud') {
-          // ── OpenAI Responses API (stored prompt template) ──────────────────
-          if (!cloudAiConfig) {
+          const runtimeCloudConfig = getCloudAiConfig()
+          const userApiKey = runtimeCloudConfig ? null : loadCloudAiKey()
+          if (!runtimeCloudConfig && !userApiKey) {
             throw new Error('Cloud AI is not available. Choose Local AI in Settings.')
           }
 
-          send('ollama-model', 'Cloud AI')
+          send('ollama-model', runtimeCloudConfig ? 'Nerion Cloud AI' : `OpenAI · ${OPENAI_MODEL}`)
+
+          const requestBody = runtimeCloudConfig
+            ? {
+                stream: true,
+                prompt: {
+                  id: runtimeCloudConfig.promptId,
+                  version: runtimeCloudConfig.promptVersion,
+                  variables: {
+                    name: payload.name,
+                    path: payload.path,
+                    is_directory: payload.isDir ? 'true' : 'false',
+                    size: formatSizeForPrompt(payload.sizeKB),
+                    path_context: getPathContext(payload.path),
+                  },
+                },
+              }
+            : {
+                model: OPENAI_MODEL,
+                instructions: AI_SYSTEM_PROMPT,
+                input: buildAnalysisPrompt(payload),
+                stream: true,
+              }
 
           const res = await net.fetch('https://api.openai.com/v1/responses', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${cloudAiConfig.apiKey}`,
+              'Authorization': `Bearer ${runtimeCloudConfig?.apiKey ?? userApiKey!}`,
             },
-            body: JSON.stringify({
-              stream: true,
-              prompt: {
-                id:      cloudAiConfig.promptId,
-                version: cloudAiConfig.promptVersion,
-                variables: {
-                  name:         payload.name,
-                  path:         payload.path,
-                  is_directory: payload.isDir ? 'true' : 'false',
-                  size:         formatSizeForPrompt(payload.sizeKB),
-                  path_context: getPathContext(payload.path),
-                },
-              },
-            }),
+            body: JSON.stringify(requestBody),
             signal: controller.signal
           })
 
           if (!res.ok || !res.body) {
-            const errText = await res.text().catch(() => '')
+            const errText = (await res.text().catch(() => '')).slice(0, 500)
             throw new Error(`OpenAI returned ${res.status}${errText ? ': ' + errText : ''}`)
           }
           await streamResponsesAPI(res.body, send)
@@ -1373,12 +1408,28 @@ What is this item and is it safe to delete?`
     }
   })
 
-  ipcMain.handle('get-ai-capabilities', () => getAiCapabilities())
-  ipcMain.handle('get-ai-mode', () => normalizeAiMode(loadSettings().aiMode))
+  ipcMain.handle('get-ai-capabilities', () => currentAiCapabilities())
+  ipcMain.handle('get-ai-mode', () => normalizeAiMode(
+    loadSettings().aiMode,
+    process.env,
+    loadCloudAiKey() !== null,
+  ))
   ipcMain.handle('set-ai-mode', (_event, mode: unknown) => {
-    const normalizedMode = normalizeAiMode(mode)
+    const normalizedMode = normalizeAiMode(mode, process.env, loadCloudAiKey() !== null)
     patchSettings({ aiMode: normalizedMode })
     return normalizedMode
+  })
+  ipcMain.handle('cloud-ai:configure', async (_event, apiKey: unknown) => {
+    if (!getLicenseInfo().active) throw new Error('A paid license is required for Cloud AI.')
+    await validateAndSaveCloudAiKey(apiKey)
+    patchSettings({ aiMode: 'cloud' })
+    return currentAiCapabilities()
+  })
+  ipcMain.handle('cloud-ai:remove', () => {
+    removeCloudAiKey()
+    const capabilities = currentAiCapabilities()
+    if (!capabilities.cloudAvailable) patchSettings({ aiMode: 'ollama' })
+    return capabilities
   })
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -1400,7 +1451,7 @@ What is this item and is it safe to delete?`
     })
     const mergedSettings: NerionSettings = {
       ...validatedSettings,
-      aiMode: normalizeAiMode(validatedSettings.aiMode),
+      aiMode: normalizeAiMode(validatedSettings.aiMode, process.env, loadCloudAiKey() !== null),
     }
     saveSettings(mergedSettings)
     if (mergedSettings.backgroundScan.enabled !== prev.backgroundScan.enabled ||
@@ -1611,7 +1662,7 @@ What is this item and is it safe to delete?`
   // Single-flight startup + recurring entitlement refresh service.
   startLicenseValidationService()
 
-  ipcMain.handle('run-bg-scan', () => runBackgroundScan())
+  ipcMain.handle('run-bg-scan', () => runBackgroundScanNow())
 
   ipcMain.on('update-last-scan-path', (_event, scanPath: unknown) => {
     if (isValidIpcPath(scanPath)) updateLastScanPath(scanPath)

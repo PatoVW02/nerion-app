@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { UpdaterStatusEvent } from '../main/updater'
 import type { PlatformInfo } from '../renderer/types'
-import type { AiCapabilities, DeleteBatchResult, DeleteItemStatus, LeftoverScanResult, LicenseSnapshot, PlatformAppearance, ScanEventV1 } from '../shared/contracts'
+import type { AiCapabilities, BackgroundScanRunOutcome, DeleteBatchResult, DeleteItemStatus, LeftoverScanResult, LicenseSnapshot, PlatformAppearance, ScanEventV1 } from '../shared/contracts'
 
 // Single persistent listeners — callbacks are swapped, never re-registered.
 const ollamaCallbacks: {
@@ -42,12 +42,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   cancelScan: () => ipcRenderer.send('scan-cancel'),
   onScanEvent: (cb: (event: ScanEventV1) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, event: ScanEventV1) => cb(event)
-    ipcRenderer.on('scan-event', handler)
-    return () => ipcRenderer.off('scan-event', handler)
+    const singleHandler = (_event: Electron.IpcRendererEvent, event: ScanEventV1) => cb(event)
+    const batchHandler = (_event: Electron.IpcRendererEvent, events: ScanEventV1[]) => {
+      for (const event of events) cb(event)
+    }
+    ipcRenderer.on('scan-event', singleHandler)
+    ipcRenderer.on('scan-events', batchHandler)
+    return () => {
+      ipcRenderer.off('scan-event', singleHandler)
+      ipcRenderer.off('scan-events', batchHandler)
+    }
   },
   removeScanListeners: () => {
     ipcRenderer.removeAllListeners('scan-event')
+    ipcRenderer.removeAllListeners('scan-events')
   },
 
   // ── File operations ───────────────────────────────────────────────────────
@@ -96,7 +104,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppVersion: () => ipcRenderer.invoke('get-app-version') as Promise<string>,
   getAppArch: () => ipcRenderer.invoke('get-app-arch') as Promise<string>,
   saveSettings: (settings: unknown) => ipcRenderer.invoke('save-settings', settings),
-  runBgScanNow: () => ipcRenderer.invoke('run-bg-scan'),
+  runBgScanNow: () => ipcRenderer.invoke('run-bg-scan') as Promise<BackgroundScanRunOutcome>,
   updateLastScanPath: (path: string) => ipcRenderer.send('update-last-scan-path', path),
   notifyManualScanDone: (foundKB: number) => ipcRenderer.send('notify-manual-scan-done', foundKB),
   notifyCleaned: (cleanedKB: number) => ipcRenderer.send('notify-cleaned', cleanedKB),
@@ -153,6 +161,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── AI mode ───────────────────────────────────────────────────────────────
   getAiCapabilities: () => ipcRenderer.invoke('get-ai-capabilities') as Promise<AiCapabilities>,
+  configureCloudAi: (apiKey: string) => ipcRenderer.invoke('cloud-ai:configure', apiKey) as Promise<AiCapabilities>,
+  removeCloudAiCredential: () => ipcRenderer.invoke('cloud-ai:remove') as Promise<AiCapabilities>,
   getAiMode: () => ipcRenderer.invoke('get-ai-mode') as Promise<'cloud' | 'ollama'>,
   setAiMode: (mode: 'cloud' | 'ollama') => ipcRenderer.invoke('set-ai-mode', mode) as Promise<'cloud' | 'ollama'>,
 })

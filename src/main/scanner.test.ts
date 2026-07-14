@@ -97,3 +97,23 @@ describe('Node scanner fallback', () => {
     expect(scannerTesting.decodeExactUtf8Name(Buffer.from([0x69, 0x6e, 0x76, 0xff]))).toBeNull()
   })
 })
+
+describe('native scanner scheduling', () => {
+  it('uses macOS disk throttling and a background QoS clamp for scheduled scans', () => {
+    expect(scannerTesting.nativeScannerLaunch('/scanner', ['/root'], 'background', 'darwin')).toEqual({
+      command: '/usr/sbin/taskpolicy',
+      args: ['-d', 'throttle', '-c', 'background', '-b', '/scanner', '/root'],
+    })
+  })
+
+  it('uses utility QoS interactively and launches the scanner directly on Windows', () => {
+    expect(scannerTesting.nativeScannerLaunch('/scanner', ['/root'], 'interactive', 'darwin')).toEqual({
+      command: '/usr/sbin/taskpolicy',
+      args: ['-d', 'throttle', '-c', 'utility', '/scanner', '/root'],
+    })
+    expect(scannerTesting.nativeScannerLaunch('scanner.exe', ['C:\\Root'], 'interactive', 'win32')).toEqual({
+      command: 'scanner.exe',
+      args: ['C:\\Root'],
+    })
+  })
+})

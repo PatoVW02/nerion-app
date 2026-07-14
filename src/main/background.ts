@@ -4,12 +4,28 @@ import { is } from '@electron-toolkit/utils'
 import { scanDirectoryStreaming, DiskEntry } from './scanner'
 import { loadSettings, patchSettings } from './settings'
 import * as os from 'os'
-import { getDefaultQuickScanFolders, isCleanable as sharedIsCleanable, isDevDependency as sharedIsDevDependency, resolveQuickFolderPath } from '../shared/policy'
+import {
+  getDefaultQuickScanFolders,
+  isAppleMetadata,
+  isAutomaticCleanupRoot,
+  isCleanable as sharedIsCleanable,
+  isDevDependency as sharedIsDevDependency,
+  resolveQuickFolderPath,
+} from '../shared/policy'
 import { getAppPlatform } from './platform'
 import { collapseOverlappingPaths, isSameOrDescendantPath, pathComparisonKey } from '../shared/path-utils'
 import { getLicenseInfo } from './license'
-import type { ScanSummaryV1 } from '../shared/contracts'
+import type { BackgroundScanRunOutcome, ScanSummaryV1 } from '../shared/contracts'
 import { planBackgroundTimer, summarizeBackgroundScan } from './runtime-policy'
+import {
+  attachBackgroundCancel,
+  cancelBackgroundScan,
+  detachBackgroundCancel,
+  endBackgroundScan,
+  isBackgroundScanActive,
+  tryBeginBackgroundScan,
+  type BackgroundScanLease,
+} from './scan-coordination'
 
 function isCleanableEntry(e: DiskEntry): boolean {
   return sharedIsCleanable(e, getAppPlatform())
@@ -48,7 +64,6 @@ let trayLabelInterval: ReturnType<typeof setInterval> | null = null
 let scanning = false
 let getMainWin: () => BrowserWindow | null = () => null
 let quitting = false
-const activeBackgroundCancels = new Set<() => void>()
 
 export function setQuitting(): void { quitting = true }
 export function isQuitting(): boolean { return quitting }
@@ -207,7 +222,7 @@ export function rebuildTrayMenu(): void {
   items.push({
     label: scanning ? 'Scanning…' : 'Scan Now',
     enabled: !scanning,
-    click: () => runBackgroundScan()
+    click: () => { void runBackgroundScanNow() }
   })
 
   items.push({ type: 'separator' })
@@ -233,23 +248,24 @@ export function rebuildTrayMenu(): void {
 function scanFolder(
   dirPath: string,
   seenHardlinks: Set<string>,
-): Promise<{ entries: DiskEntry[]; summary: ScanSummaryV1 }> {
+  lease: BackgroundScanLease,
+  onEntry: (entry: DiskEntry) => void,
+): Promise<ScanSummaryV1> {
   return new Promise((resolve) => {
-    const entries: DiskEntry[] = []
     const duplicateBytes: Array<{ path: string; bytes: number }> = []
     const currentPlatform = getAppPlatform()
     const scanId = `background-${Date.now()}-${Math.random().toString(36).slice(2)}`
     let cancelScan = (): void => {}
     cancelScan = scanDirectoryStreaming(
       dirPath,
-      { scanId, rootId: 'root-0', lowPriority: true },
+      { scanId, rootId: 'root-0', profile: 'background' },
       (event) => {
         if (event.event !== 'entry') return
         if (!event.isDir && event.device && event.inode) {
           const identity = `${event.device}:${event.inode}`
           if (seenHardlinks.has(identity) && !event.hardlinkDuplicate) {
             duplicateBytes.push({ path: event.path, bytes: event.allocatedBytes })
-            entries.push({ ...event, allocatedBytes: 0, sizeKB: 0, hardlinkDuplicate: true })
+            onEntry({ ...event, allocatedBytes: 0, sizeKB: 0, hardlinkDuplicate: true })
             return
           }
           seenHardlinks.add(identity)
@@ -260,31 +276,33 @@ function scanFolder(
             .reduce((total, duplicate) => total + duplicate.bytes, 0)
           if (adjustment > 0) {
             const allocatedBytes = Math.max(0, event.allocatedBytes - adjustment)
-            entries.push({ ...event, allocatedBytes, sizeKB: Math.ceil(allocatedBytes / 1024) })
+            onEntry({ ...event, allocatedBytes, sizeKB: Math.ceil(allocatedBytes / 1024) })
             return
           }
         }
-        entries.push(event)
+        onEntry(event)
       },
       ({ summary }) => {
-        activeBackgroundCancels.delete(cancelScan)
-        resolve({ entries, summary })
+        detachBackgroundCancel(lease, cancelScan)
+        resolve(summary)
       },
     )
-    activeBackgroundCancels.add(cancelScan)
+    attachBackgroundCancel(lease, cancelScan)
   })
 }
 
-export async function runBackgroundScan(): Promise<void> {
-  if (scanning || quitting) return
+export async function runBackgroundScan(): Promise<BackgroundScanRunOutcome> {
+  if (scanning || quitting) return 'deferred'
   const settings = loadSettings()
   if (!getLicenseInfo().active) {
     if (settings.backgroundScan.enabled) {
       patchSettings({ backgroundScan: { enabled: false } })
       rebuildTrayMenu()
     }
-    return
+    return 'disabled'
   }
+  const lease = tryBeginBackgroundScan()
+  if (!lease) return 'deferred'
   const home = os.homedir()
   const platform = getAppPlatform()
 
@@ -312,16 +330,20 @@ export async function runBackgroundScan(): Promise<void> {
       },
     })
     rebuildTrayMenu()
-    return
+    endBackgroundScan(lease)
+    return 'no-targets'
   }
 
   const allowedPrefixes = [...allowedPaths]
-  const downloadsParents = new Set<string>()
-  const trashParents = new Set<string>()
+  const downloadsParentKeys = new Set<string>()
+  const trashParentKeys = new Set<string>()
+  const automaticCleanupParentKeys = new Set<string>()
   for (const p of allowedPaths) {
     const leaf = p.split(/[\\/]/).pop()?.toLowerCase()
-    if (leaf === 'downloads') downloadsParents.add(p)
-    if (leaf === '.trash' || leaf === '$recycle.bin') trashParents.add(p)
+    const key = pathComparisonKey(p, platform)
+    if (leaf === 'downloads') downloadsParentKeys.add(key)
+    if (leaf === '.trash' || leaf === '$recycle.bin') trashParentKeys.add(key)
+    if (isAutomaticCleanupRoot(p, platform, home)) automaticCleanupParentKeys.add(key)
   }
 
   scanning = true
@@ -332,27 +354,30 @@ export async function runBackgroundScan(): Promise<void> {
     const seenHardlinks = new Set<string>()
     const rootSummaries: ScanSummaryV1[] = []
 
-    for (const scanPath of dedupedScanPaths) {
-      const { entries, summary } = await scanFolder(scanPath, seenHardlinks)
-      if (quitting) return
-      rootSummaries.push(summary)
-      for (const entry of entries) {
-        const isDev = isDevDependencyEntry(entry)
-        const lastSeparator = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'))
-        const parentDir = lastSeparator === -1 ? '' : entry.path.slice(0, lastSeparator)
-        const parentKey = pathComparisonKey(parentDir, platform)
-        const isDownloadsItem = [...downloadsParents].some((parent) => pathComparisonKey(parent, platform) === parentKey) && entry.sizeKB > 0
-        const isTrashItem = [...trashParents].some((parent) => pathComparisonKey(parent, platform) === parentKey) && entry.sizeKB > 0
+    const considerEntry = (entry: DiskEntry) => {
+      if (isAppleMetadata(entry, platform)) return
+      const isDev = isDevDependencyEntry(entry)
+      const lastSeparator = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'))
+      const parentDir = lastSeparator === -1 ? '' : entry.path.slice(0, lastSeparator)
+      const parentKey = pathComparisonKey(parentDir, platform)
+      const isDownloadsItem = downloadsParentKeys.has(parentKey) && entry.sizeKB > 0
+      const isTrashItem = trashParentKeys.has(parentKey) && entry.sizeKB > 0
+      const isAutomaticCleanupItem = automaticCleanupParentKeys.has(parentKey) && entry.sizeKB > 0
 
-        if (!isDev && !isDownloadsItem && !isTrashItem) {
-          const inAllowedPath = allowedPrefixes.some((p) => isSameOrDescendantPath(entry.path, p, platform))
-          if (!inAllowedPath) continue
-        }
-
-        if (isCleanableEntry(entry) || isDev || isDownloadsItem || isTrashItem) {
-          allCleanable.push(entry)
-        }
+      if (!isDev && !isDownloadsItem && !isTrashItem && !isAutomaticCleanupItem) {
+        const inAllowedPath = allowedPrefixes.some((p) => isSameOrDescendantPath(entry.path, p, platform))
+        if (!inAllowedPath) return
       }
+
+      if (isCleanableEntry(entry) || isDev || isDownloadsItem || isTrashItem || isAutomaticCleanupItem) {
+        allCleanable.push(entry)
+      }
+    }
+
+    for (const scanPath of dedupedScanPaths) {
+      const summary = await scanFolder(scanPath, seenHardlinks, lease, considerEntry)
+      if (quitting || !isBackgroundScanActive(lease)) return 'cancelled'
+      rootSummaries.push(summary)
     }
 
     const totalKB = allCleanable.reduce((s, e) => s + e.sizeKB, 0)
@@ -403,6 +428,7 @@ export async function runBackgroundScan(): Promise<void> {
       })
       note.show()
     }
+    return 'completed'
   } catch (err) {
     console.error('[Nerion] Background scan error:', err)
     patchSettings({
@@ -414,8 +440,10 @@ export async function runBackgroundScan(): Promise<void> {
         lastScanError: err instanceof Error ? err.message : 'The background scan failed unexpectedly.',
       },
     })
+    return 'failed'
   } finally {
     scanning = false
+    endBackgroundScan(lease)
     rebuildTrayMenu()
   }
 }
@@ -445,13 +473,27 @@ function scheduleNext(): void {
   if (!bg.enabled || !getLicenseInfo().active) return
   const timerPlan = planBackgroundTimer(nextScanDelay(bg))
   bgTimeout = setTimeout(async () => {
+    bgTimeout = null
     if (!timerPlan.scanWhenFired) {
       scheduleNext()
       return
     }
-    await runBackgroundScan()
-    scheduleNext()
+    const outcome = await runBackgroundScan()
+    if (outcome === 'deferred' || outcome === 'cancelled') scheduleRetry()
+    else scheduleNext()
   }, timerPlan.delayMs)
+}
+
+function scheduleRetry(): void {
+  clearSchedule()
+  const { backgroundScan: bg } = loadSettings()
+  if (!bg.enabled || !getLicenseInfo().active || quitting) return
+  bgTimeout = setTimeout(async () => {
+    bgTimeout = null
+    const outcome = await runBackgroundScan()
+    if (outcome === 'deferred' || outcome === 'cancelled') scheduleRetry()
+    else scheduleNext()
+  }, 15 * 60 * 1000)
 }
 
 export function scheduleBackgroundScan(): void {
@@ -459,8 +501,18 @@ export function scheduleBackgroundScan(): void {
   scheduleNext()
 }
 
+/** A user-triggered run resets the recurring schedule after it finishes. */
+export async function runBackgroundScanNow(): Promise<BackgroundScanRunOutcome> {
+  const outcome = await runBackgroundScan()
+  if (outcome === 'completed' || outcome === 'disabled' || outcome === 'failed' || outcome === 'no-targets') {
+    scheduleBackgroundScan()
+  }
+  return outcome
+}
+
 export function stopBackgroundScan(): void {
   clearSchedule()
+  cancelBackgroundScan()
 }
 
 function clearSchedule(): void {
@@ -469,8 +521,7 @@ function clearSchedule(): void {
 
 export function disposeBackgroundServices(): void {
   clearSchedule()
-  for (const cancel of activeBackgroundCancels) cancel()
-  activeBackgroundCancels.clear()
+  cancelBackgroundScan()
   if (trayLabelInterval) {
     clearInterval(trayLabelInterval)
     trayLabelInterval = null

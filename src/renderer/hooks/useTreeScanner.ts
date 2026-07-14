@@ -32,6 +32,7 @@ function insertSorted(arr: DiskEntry[], entry: DiskEntry): void {
 export function useTreeScanner(rootPath: string | null, scanTrigger: number, scanPaths?: string[] | null): TreeScanState {
   const internalTree = useRef<TreeMap>(new Map())
   const pendingCount = useRef(0)
+  const dirtyParents = useRef(new Set<string>())
   const batchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const activeScanId = useRef<string | null>(null)
   const scanIssues = useRef<ScanIssue[]>([])
@@ -123,6 +124,7 @@ export function useTreeScanner(rootPath: string | null, scanTrigger: number, sca
     // Reset for new root
     internalTree.current = new Map()
     pendingCount.current = 0
+    dirtyParents.current = new Set()
     scanIssues.current = []
     suspiciousFindings.current = new Map()
     if (batchTimer.current) clearTimeout(batchTimer.current)
@@ -133,27 +135,32 @@ export function useTreeScanner(rootPath: string | null, scanTrigger: number, sca
 
     function flushBatch(finalScan: boolean, finalError: string | null = null, summary: ScanSummaryV1 | null = null) {
       batchTimer.current = null
-      // Copy each directory's array so React sees new references and
-      // useMemo in TreemapView recomputes the layout. Without this,
-      // insertSorted mutates arrays in-place and useMemo bails out.
-      const newTree = new Map<string, DiskEntry[]>()
-      for (const [k, v] of internalTree.current) {
-        newTree.set(k, v.slice())
-      }
-      setState({
-        tree: newTree,
-        scanning: !finalScan,
-        scannedCount: pendingCount.current,
-        error: finalError,
-        issues: [...scanIssues.current],
-        summary,
-        suspiciousFindings: [...suspiciousFindings.current.values()],
+      // Only clone buckets changed since the previous render. Copying every
+      // directory on every progress tick becomes quadratic on large scans.
+      const changedParents = [...dirtyParents.current]
+      dirtyParents.current.clear()
+      setState((previous) => {
+        const newTree = new Map(previous.tree)
+        for (const parent of changedParents) {
+          const entries = internalTree.current.get(parent)
+          if (entries) newTree.set(parent, entries.slice())
+          else newTree.delete(parent)
+        }
+        return {
+          tree: newTree,
+          scanning: !finalScan,
+          scannedCount: pendingCount.current,
+          error: finalError,
+          issues: [...scanIssues.current],
+          summary,
+          suspiciousFindings: [...suspiciousFindings.current.values()],
+        }
       })
     }
 
     function scheduleBatch() {
       if (batchTimer.current) return
-      batchTimer.current = setTimeout(() => flushBatch(false), 150)
+      batchTimer.current = setTimeout(() => flushBatch(false), 250)
     }
 
     const unsubscribe = window.electronAPI.onScanEvent((event) => {
@@ -182,6 +189,7 @@ export function useTreeScanner(rootPath: string | null, scanTrigger: number, sca
         internalTree.current.set(parent, siblings)
       }
       insertSorted(siblings, entry)
+      dirtyParents.current.add(parent)
       pendingCount.current++
       scheduleBatch()
     })

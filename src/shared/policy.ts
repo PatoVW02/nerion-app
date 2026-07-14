@@ -202,6 +202,28 @@ export function isCleanable(
   return safeRoots.some((root) => pathValue === root || pathValue.startsWith(`${root}/`))
 }
 
+/**
+ * Roots whose direct children are ordinary disposable cache/log/temp content.
+ * Scanners do not emit their root as an entry, so consumers need this policy
+ * to classify the root's first-level children consistently.
+ */
+export function isAutomaticCleanupRoot(
+  itemPath: string,
+  platform: AppPlatform = detectRuntimePlatform(),
+  explicitHomeDir?: string | null,
+): boolean {
+  const pathValue = lower(normalizePathForPlatform(itemPath, platform))
+  if (platform === 'windows') {
+    const home = lower(normalizeWindowsPath(explicitHomeDir ?? detectHomeDir(platform) ?? 'c:\\users\\__unknown__'))
+    return pathValue === `${home}\\appdata\\local\\temp`
+      || pathValue === `${home}\\appdata\\local\\logs`
+  }
+
+  const home = lower(normalizeMacPath(explicitHomeDir ?? detectHomeDir(platform) ?? '/Users/__unknown__'))
+  return pathValue === `${home}/library/caches`
+    || pathValue === `${home}/library/logs`
+}
+
 export function isCriticalPath(itemPath: string, platform: AppPlatform = detectRuntimePlatform(), explicitHomeDir?: string | null): boolean {
   const homeDir = explicitHomeDir ?? detectHomeDir(platform)
   const normalized = normalizePathForPlatform(itemPath, platform)

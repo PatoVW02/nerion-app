@@ -1,6 +1,7 @@
 import type {
   DeleteBatchResult,
   AiCapabilities,
+  BackgroundScanRunOutcome,
   LeftoverGroup,
   LeftoverScanResult,
   LicenseSnapshot,
@@ -11,7 +12,7 @@ import type {
   SuspiciousFinding,
 } from '../shared/contracts'
 
-export type { AiCapabilities, DeleteBatchResult, LeftoverGroup, LeftoverScanResult, LicenseSnapshot, PlatformAppearance, ScanEventV1, ScanIssue, ScanSummaryV1, SuspiciousFinding }
+export type { AiCapabilities, BackgroundScanRunOutcome, DeleteBatchResult, LeftoverGroup, LeftoverScanResult, LicenseSnapshot, PlatformAppearance, ScanEventV1, ScanIssue, ScanSummaryV1, SuspiciousFinding }
 
 export interface DiskEntry {
   name: string
@@ -152,7 +153,7 @@ declare global {
       getAppVersion: () => Promise<string>
       getAppArch: () => Promise<string>
       saveSettings: (settings: NerionSettings) => Promise<void>
-      runBgScanNow: () => Promise<void>
+      runBgScanNow: () => Promise<BackgroundScanRunOutcome>
       updateLastScanPath: (path: string) => void
       notifyManualScanDone: (foundKB: number) => void
       notifyCleaned: (cleanedKB: number) => void
@@ -191,6 +192,8 @@ declare global {
 
       // AI mode
       getAiCapabilities: () => Promise<AiCapabilities>
+      configureCloudAi: (apiKey: string) => Promise<AiCapabilities>
+      removeCloudAiCredential: () => Promise<AiCapabilities>
       getAiMode: () => Promise<'cloud' | 'ollama'>
       setAiMode: (mode: 'cloud' | 'ollama') => Promise<'cloud' | 'ollama'>
     }

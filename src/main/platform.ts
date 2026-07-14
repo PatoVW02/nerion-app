@@ -5,6 +5,7 @@ import { app, nativeTheme, shell, systemPreferences, type BrowserWindow } from '
 import * as os from 'node:os'
 import { detectRuntimePlatform, getPlatformInfo, platformFromNode, type AppPlatform, type PlatformInfo } from '../shared/platform'
 import type { PlatformAppearance } from '../shared/contracts'
+import { scannerBinaryIsCompatible } from './binary-compat'
 
 export function getAppPlatform(): AppPlatform {
   return platformFromNode(process.platform)
@@ -29,6 +30,7 @@ export function resolveScannerBinaryPath(): string | null {
   for (const candidate of candidates) {
     try {
       accessSync(candidate, constants.X_OK)
+      if (!scannerBinaryIsCompatible(candidate)) continue
       return candidate
     } catch {
       // continue

@@ -69,8 +69,10 @@ Notes:
   the installer, app executable, and native scanner before upload. With neither
   secret configured, CI publishes an unsigned installer and skips signature
   verification. A partial one-secret configuration fails closed.
-- Public builds default to local Ollama. `NERION_OPENAI_*` can enable cloud AI
-  only when injected into the running main process; never use `VITE_OPENAI_*`
+- Public builds offer local Ollama and an optional bring-your-own-key OpenAI
+  mode. User keys are verified before replacement, encrypted with Electron's
+  OS-backed `safeStorage`, and never returned to the renderer. `NERION_OPENAI_*`
+  remains available for managed/internal deployments. Never use `VITE_OPENAI_*`
   for credentials because Vite embeds those values in the packaged app.
 - Checkout and variant values are used for paid plans and license flows.
 
