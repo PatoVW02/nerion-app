@@ -3,6 +3,7 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { ScanEntryV1 } from '../shared/contracts'
+import type { AppPlatform } from '../shared/platform'
 import {
   clearScanIndexes,
   commitVerifiedScanIndex,
@@ -13,6 +14,7 @@ import {
 } from './scan-index'
 
 let testDirectory: string | null = null
+const hostPlatform: AppPlatform = process.platform === 'win32' ? 'windows' : 'macos'
 
 afterEach(async () => {
   await clearScanIndexes()
@@ -40,7 +42,7 @@ function entry(root: string, relativePath: string): ScanEntryV1 {
 describe('verified scan index', () => {
   it('reuses a committed root until an overlapping filesystem path changes', async () => {
     testDirectory = await mkdtemp(path.join(tmpdir(), 'nerion-index-test-'))
-    configureScanIndex(testDirectory, { platform: 'macos', enableWatchers: false })
+    configureScanIndex(testDirectory, { platform: hostPlatform, enableWatchers: false })
     const root = path.join(testDirectory, 'root')
     const cachedEntry = entry(root, 'folder/file.bin')
 
@@ -53,7 +55,7 @@ describe('verified scan index', () => {
 
   it('rejects persisted entries that escape their indexed root', async () => {
     testDirectory = await mkdtemp(path.join(tmpdir(), 'nerion-index-test-'))
-    configureScanIndex(testDirectory, { platform: 'macos', enableWatchers: false })
+    configureScanIndex(testDirectory, { platform: hostPlatform, enableWatchers: false })
     const root = path.join(testDirectory, 'root')
     expect(scanIndexTesting.isStoredEntry({
       ...entry(root, '../outside.bin'),

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { ScanEventV1, ScanSummaryV1 } from '../shared/contracts'
+import type { AppPlatform } from '../shared/platform'
 
 vi.mock('./platform', () => ({
   getAppPlatform: () => process.platform === 'win32' ? 'windows' : 'macos',
@@ -14,6 +15,7 @@ import { clearScanIndexes, configureScanIndex, getVerifiedScanIndex, invalidateS
 import { scanDirectoryIndexedStreaming } from './indexed-scanner'
 
 let fixtureDirectory: string | null = null
+const hostPlatform: AppPlatform = process.platform === 'win32' ? 'windows' : 'macos'
 
 afterEach(async () => {
   await clearScanIndexes()
@@ -48,7 +50,7 @@ describe('indexed scanner', () => {
     const indexDirectory = path.join(fixtureDirectory, 'index')
     await mkdir(path.join(root, 'folder'), { recursive: true })
     await writeFile(path.join(root, 'folder', 'one.txt'), 'one')
-    configureScanIndex(indexDirectory, { platform: 'macos', enableWatchers: false })
+    configureScanIndex(indexDirectory, { platform: hostPlatform, enableWatchers: false })
 
     const first = await scan(root, 'scan-1')
     expect(first.summary.source).toBe('filesystem')
