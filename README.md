@@ -64,9 +64,11 @@ Notes:
 
 - `GH_TOKEN` is used by the GitHub publishing flow. Apple credentials and
   `CSC_NAME` are required only for a signed, notarized public release.
-- Windows publishing fails closed unless GitHub Actions has
-  `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`. CI verifies Authenticode
-  signatures on the installer, app executable, and native scanner before upload.
+- Windows Authenticode signing is optional. When GitHub Actions has both
+  `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`, CI verifies signatures on
+  the installer, app executable, and native scanner before upload. With neither
+  secret configured, CI publishes an unsigned installer and skips signature
+  verification. A partial one-secret configuration fails closed.
 - Public builds default to local Ollama. `NERION_OPENAI_*` can enable cloud AI
   only when injected into the running main process; never use `VITE_OPENAI_*`
   for credentials because Vite embeds those values in the packaged app.
@@ -132,7 +134,7 @@ npm run release:all
 This script refuses to release a dirty or version-mismatched checkout. It:
 
 1. validates the package, lockfile, What's New entry, billing checkout URLs,
-   pushed default-branch commit, GitHub Actions billing/signing configuration,
+   pushed default-branch commit, GitHub Actions billing configuration,
    Developer ID identity, and Apple notarization credentials
 2. runs typecheck, unit/integration tests, and native scanner tests
 3. builds, notarizes, staples, and verifies arm64, x64, and universal apps
