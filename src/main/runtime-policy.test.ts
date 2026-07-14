@@ -33,6 +33,7 @@ function settings(): NerionSettings {
     preferredOllamaModel: null,
     onboardingComplete: true,
     showDevDependencies: false,
+    localPerformanceDiagnostics: false,
     aiMode: 'ollama',
     quickScanFolders: ['Caches', '/Users/test/Existing'],
     customQuickScanFolders: ['/Users/test/Existing'],
@@ -80,6 +81,17 @@ describe('renderer settings validation', () => {
       allowedQuickFolderPresets: new Set(['Caches']),
     })
     expect(normalized.quickScanFolders).toEqual([])
+  })
+
+  it('only enables local performance diagnostics from an explicit boolean', () => {
+    expect(normalizeRendererSettings({ localPerformanceDiagnostics: true }, settings(), {
+      premium: true,
+      allowedQuickFolderPresets: new Set(['Caches']),
+    }).localPerformanceDiagnostics).toBe(true)
+    expect(normalizeRendererSettings({ localPerformanceDiagnostics: 'yes' }, settings(), {
+      premium: true,
+      allowedQuickFolderPresets: new Set(['Caches']),
+    }).localPerformanceDiagnostics).toBe(false)
   })
 
   it('keeps the tray accessible whenever background scanning is enabled', () => {

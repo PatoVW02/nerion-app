@@ -5,6 +5,7 @@ import { isCriticalPath, isContentOnlyProtectedRoot } from '../utils/criticalPat
 import { EmptyState } from './EmptyState'
 import { ScanningLoader } from './ScanningLoader'
 import { SelectionBar } from './SelectionBar'
+import { getVirtualWindow } from '../utils/virtual-list'
 
 // ─── Squarify layout ────────────────────────────────────────────────────────
 
@@ -23,17 +24,18 @@ function worstRatio(row: number[], w: number): number {
 function layoutItems(
   items: DiskEntry[],
   values: number[],
+  startIndex: number,
   rect: Rect,
   out: LayoutItem[]
 ): void {
-  if (items.length === 0 || rect.w <= 0 || rect.h <= 0) return
+  if (startIndex >= items.length || rect.w <= 0 || rect.h <= 0) return
 
   const horizontal = rect.w >= rect.h
   const rowLength = horizontal ? rect.h : rect.w
 
   const row: number[] = []
   const rowItems: DiskEntry[] = []
-  let i = 0
+  let i = startIndex
 
   while (i < items.length) {
     const candidate = [...row, values[i]]
@@ -64,7 +66,7 @@ function layoutItems(
     ? { x: rect.x + thickness, y: rect.y, w: rect.w - thickness, h: rect.h }
     : { x: rect.x, y: rect.y + thickness, w: rect.w, h: rect.h - thickness }
 
-  layoutItems(items.slice(i), values.slice(i), remaining, out)
+  layoutItems(items, values, i, remaining, out)
 }
 
 // Largest block is capped at this fraction of total area so one item never
@@ -123,7 +125,7 @@ function squarify(entries: DiskEntry[], rect: Rect, sizePower = 1): LayoutItem[]
   const values = adjusted.map((v) => (v / total) * area)
 
   const result: LayoutItem[] = []
-  layoutItems(entries, values, rect, result)
+  layoutItems(entries, values, 0, rect, result)
   return result
 }
 
@@ -250,7 +252,14 @@ function TreemapBlock({
         bg, border, ring,
         entry.isDir ? 'cursor-pointer' : 'cursor-default'
       ].join(' ')}
+      role={entry.isDir ? 'button' : undefined}
+      tabIndex={entry.isDir ? 0 : undefined}
       onClick={() => { if (entry.isDir) onNavigate(entry) }}
+      onKeyDown={(event) => {
+        if (!entry.isDir || (event.key !== 'Enter' && event.key !== ' ')) return
+        event.preventDefault()
+        onNavigate(entry)
+      }}
       onContextMenu={(e) => {
         e.preventDefault()
         e.stopPropagation()
@@ -286,7 +295,9 @@ function TreemapBlock({
 
       {/* Selection checkbox — top-right corner, visible on block hover or when selected */}
       {showCheckbox && (
-        <div
+        <button
+          type="button"
+          aria-label={isSelected ? `Deselect ${entry.name}` : `Select ${entry.name}`}
           style={{ position: 'absolute', top: 5, right: 5 }}
           onClick={(e) => { e.stopPropagation(); onToggleSelect(entry) }}
         >
@@ -302,7 +313,7 @@ function TreemapBlock({
               </svg>
             )}
           </div>
-        </div>
+        </button>
       )}
     </div>
   )
@@ -373,6 +384,9 @@ const PANEL_MIN_W = 200
 const PANEL_DEFAULT_W = 360
 const PANEL_MAX_RATIO = 0.75
 const TREEMAP_MIN_W = 260
+const LIST_ROW_HEIGHT = 28
+const LIST_OVERSCAN = 8
+const MAX_TREEMAP_BLOCKS = 1_500
 
 function getPanelMaxWidth(): number {
   if (typeof window === 'undefined') return PANEL_DEFAULT_W
@@ -397,6 +411,10 @@ export function TreemapView({
   const containerRef = useRef<HTMLDivElement>(null)
   const [dims, setDims] = useState({ w: 0, h: 0 })
   const [zoomLevel, setZoomLevel] = useState(0)
+  const listViewportRef = useRef<HTMLDivElement>(null)
+  const listScrollFrame = useRef<number | null>(null)
+  const [listViewportHeight, setListViewportHeight] = useState(0)
+  const [listScrollTop, setListScrollTop] = useState(0)
 
   // ── Panel resize ───────────────────────────────────────────────────────────
   const [panelWidth, setPanelWidth] = useState(PANEL_DEFAULT_W)
@@ -434,6 +452,10 @@ export function TreemapView({
     }
   }, [])
 
+  useEffect(() => () => {
+    if (listScrollFrame.current !== null) cancelAnimationFrame(listScrollFrame.current)
+  }, [])
+
   useEffect(() => {
     function syncPanelWidthToViewport() {
       setPanelWidth((prev) => Math.max(PANEL_MIN_W, Math.min(getPanelMaxWidth(), prev)))
@@ -462,63 +484,32 @@ export function TreemapView({
     return () => ro.disconnect()
   }, [])
 
+  useLayoutEffect(() => {
+    const element = listViewportRef.current
+    if (!element) return
+    const observer = new ResizeObserver(([entry]) => setListViewportHeight(entry.contentRect.height))
+    observer.observe(element)
+    setListViewportHeight(element.clientHeight)
+    return () => observer.disconnect()
+  }, [])
+
   const firstEntryPath = entries[0]?.path ?? ''
 
   // Reset zoom on navigation
   useEffect(() => { setZoomLevel(0) }, [firstEntryPath])
 
-  // Load created dates once the scan for the current folder is done
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const scanKey = `${firstEntryPath}:${scanning ? 'scanning' : 'done'}`
   useEffect(() => {
-    if (scanning || entries.length === 0) { setItemDates({}); return }
-
-    let cancelled = false
     setItemDates({})
-    const batch: Record<string, string> = {}
-    let flushTimer: ReturnType<typeof setTimeout> | null = null
-
-    function flush() {
-      if (cancelled) return
-      setItemDates({ ...batch })
-      flushTimer = null
-    }
-
-    let nextIndex = 0
-    const workerCount = Math.min(8, entries.length)
-    const loadNext = async () => {
-      while (!cancelled) {
-        const index = nextIndex++
-        if (index >= entries.length) return
-        const e = entries[index]
-        try {
-          const stats = await window.electronAPI.getItemStats(e.path)
-          if (cancelled) return
-          if ('created' in stats && stats.created) {
-            batch[e.path] = stats.created
-            if (!flushTimer) flushTimer = setTimeout(flush, 200)
-          }
-        } catch {
-          // A disappearing or inaccessible entry should not abort metadata for
-          // every other row in the folder.
-        }
-      }
-    }
-
-    Promise.all(Array.from({ length: workerCount }, () => loadNext())).then(() => {
-      if (flushTimer) clearTimeout(flushTimer)
-      flush()
-    })
-
-    return () => {
-      cancelled = true
-      if (flushTimer) clearTimeout(flushTimer)
-    }
-  // scanKey captures both firstEntryPath and scanning — intentional narrow dep
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    setListScrollTop(0)
+    if (listViewportRef.current) listViewportRef.current.scrollTop = 0
   }, [scanKey])
 
   const visibleEntries = useMemo(() => entries.filter(e => e.sizeKB > 0), [entries])
+  const treemapEntries = useMemo(
+    () => visibleEntries.slice(0, MAX_TREEMAP_BLOCKS),
+    [visibleEntries],
+  )
 
   // ── List panel — sorted entries ────────────────────────────────────────────
   const sortedEntries = useMemo(() => {
@@ -538,6 +529,60 @@ export function TreemapView({
     })
     return arr
   }, [visibleEntries, sortField, sortDir, itemDates])
+
+  const virtualWindow = useMemo(
+    () => getVirtualWindow(sortedEntries.length, listScrollTop, listViewportHeight, LIST_ROW_HEIGHT, LIST_OVERSCAN),
+    [sortedEntries.length, listScrollTop, listViewportHeight],
+  )
+  const virtualEntries = useMemo(
+    () => sortedEntries.slice(virtualWindow.start, virtualWindow.end),
+    [sortedEntries, virtualWindow.start, virtualWindow.end],
+  )
+  const metadataTargets = useMemo(
+    () => sortField === 'created' ? entries : virtualEntries,
+    [sortField, entries, virtualEntries],
+  )
+
+  // Creation dates are deliberately demand-loaded. The previous all-at-once
+  // pass could issue thousands of extra stat calls immediately after a scan.
+  useEffect(() => {
+    if (scanning || entries.length === 0) return
+    const missing = metadataTargets.filter((entry) => !itemDates[entry.path])
+    if (missing.length === 0) return
+
+    let cancelled = false
+    let nextIndex = 0
+    const batch: Record<string, string> = {}
+    const workerCount = Math.min(sortField === 'created' ? 2 : 4, missing.length)
+    const loadNext = async () => {
+      while (!cancelled) {
+        const index = nextIndex++
+        if (index >= missing.length) return
+        const entry = missing[index]
+        try {
+          const stats = await window.electronAPI.getItemStats(entry.path)
+          if (!cancelled && 'created' in stats && stats.created) batch[entry.path] = stats.created
+        } catch {
+          // One disappearing/inaccessible entry must not abort the visible batch.
+        }
+      }
+    }
+
+    void Promise.all(Array.from({ length: workerCount }, () => loadNext())).then(() => {
+      if (!cancelled && Object.keys(batch).length > 0) {
+        setItemDates((previous) => ({ ...previous, ...batch }))
+      }
+    })
+    return () => { cancelled = true }
+  }, [scanning, metadataTargets, itemDates, sortField])
+
+  function handleListScroll(scrollTop: number) {
+    if (listScrollFrame.current !== null) cancelAnimationFrame(listScrollFrame.current)
+    listScrollFrame.current = requestAnimationFrame(() => {
+      listScrollFrame.current = null
+      setListScrollTop(scrollTop)
+    })
+  }
 
   function handleSortClick(field: SortField) {
     if (field === sortField) {
@@ -587,8 +632,8 @@ export function TreemapView({
   const sizePower = 1 - zoomLevel * (1 - minSizePower)
 
   const layout = useMemo(
-    () => squarify(visibleEntries, { x: 0, y: 0, w: dims.w, h: dims.h }, sizePower),
-    [visibleEntries, dims, sizePower]
+    () => squarify(treemapEntries, { x: 0, y: 0, w: dims.w, h: dims.h }, sizePower),
+    [treemapEntries, dims, sizePower]
   )
 
   const maxSizeKB = visibleEntries[0]?.sizeKB ?? 1
@@ -620,8 +665,10 @@ export function TreemapView({
         {/* Column headers */}
         <div className="flex items-center gap-0 px-3 py-2 border-b border-white/[0.06] shrink-0">
           {/* Select-all checkbox */}
-          <div
+          <button
+            type="button"
             onClick={handleSelectAll}
+            aria-label={allSelected || someSelected ? 'Deselect all items' : 'Select all items'}
             title={allSelected || someSelected ? 'Deselect all' : 'Select all'}
             className={[
               'shrink-0 w-4 h-4 mr-2 rounded border flex items-center justify-center transition-all duration-100 cursor-pointer',
@@ -640,7 +687,7 @@ export function TreemapView({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 12h14" />
               </svg>
             )}
-          </div>
+          </button>
 
           <button
             onClick={() => handleSortClick('name')}
@@ -681,25 +728,44 @@ export function TreemapView({
         )}
 
         {/* Rows */}
-        <div className="flex-1 overflow-y-auto min-h-0 scrollbar-dark">
+        <div
+          ref={listViewportRef}
+          onScroll={(event) => handleListScroll(event.currentTarget.scrollTop)}
+          className="flex-1 overflow-y-auto min-h-0 scrollbar-dark"
+        >
           {!hasEntries && !scanning ? (
             <p className="text-[11px] text-zinc-600 text-center mt-8">No items</p>
           ) : (
-            sortedEntries.map((entry) => {
+            <div className="relative" style={{ height: virtualWindow.totalHeight }}>
+            {virtualEntries.map((entry, virtualIndex) => {
               const isSelected  = selectedPaths.has(entry.path)
               const isCritical  = isCriticalPath(entry.path)
               const canSelect   = !isCritical || isContentOnlyProtectedRoot(entry.path)
               return (
                 <div
                   key={entry.path}
+                  style={{
+                    position: 'absolute',
+                    top: virtualWindow.offsetTop + virtualIndex * LIST_ROW_HEIGHT,
+                    left: 0,
+                    right: 0,
+                    height: LIST_ROW_HEIGHT,
+                  }}
                   onClick={() => { if (entry.isDir) onNavigate(entry) }}
+                  role={entry.isDir ? 'button' : undefined}
+                  tabIndex={entry.isDir ? 0 : undefined}
+                  onKeyDown={(event) => {
+                    if (!entry.isDir || (event.key !== 'Enter' && event.key !== ' ')) return
+                    event.preventDefault()
+                    onNavigate(entry)
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
                     onContextMenu(entry, e.clientX, e.clientY)
                   }}
                   className={[
-                    'group flex items-center gap-0 px-3 py-1.5 border-b border-white/[0.03] transition-colors',
+                    'group flex items-center gap-0 px-3 border-b border-white/[0.03] transition-colors',
                     entry.isDir ? 'cursor-pointer' : 'cursor-default',
                     isSelected
                       ? 'bg-blue-500/15'
@@ -709,7 +775,10 @@ export function TreemapView({
                   ].join(' ')}
                 >
                   {/* Per-row checkbox — matches the block checkbox style */}
-                  <div
+                  <button
+                    type="button"
+                    aria-label={isSelected ? `Deselect ${entry.name}` : `Select ${entry.name}`}
+                    disabled={!canSelect}
                     onClick={(e) => { e.stopPropagation(); if (canSelect) onToggleSelect(entry) }}
                     className={[
                       'shrink-0 w-4 h-4 mr-2 rounded border flex items-center justify-center transition-all duration-100',
@@ -725,7 +794,7 @@ export function TreemapView({
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                       </svg>
                     )}
-                  </div>
+                  </button>
 
                   {/* Icon */}
                   <span className="shrink-0 mr-1.5 text-zinc-500">
@@ -763,6 +832,8 @@ export function TreemapView({
                 </div>
               )
             })
+            }
+            </div>
           )}
         </div>
 

@@ -77,6 +77,12 @@ export interface ScanSummaryV1 {
   fatalError: string | null
   securityAnalysis: 'disabled' | 'complete' | 'partial'
   suspiciousCount: number
+  /** Whether this result required filesystem traversal or reused a journal-validated index. */
+  source?: 'filesystem' | 'index'
+  /** Wall-clock work for this root or aggregate scan. Used for local diagnostics only. */
+  durationMs?: number
+  /** Native change-journal cursor used internally to validate a persisted index. */
+  journalId?: string | null
 }
 
 export type ScanEventV1 = ScanEntryV1 | ScanIssueV1 | ScanSuspiciousV1 | ScanSummaryV1

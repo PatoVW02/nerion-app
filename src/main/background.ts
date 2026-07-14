@@ -1,7 +1,8 @@
 import { Tray, Menu, Notification, nativeImage, BrowserWindow, app } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import { scanDirectoryStreaming, DiskEntry } from './scanner'
+import type { DiskEntry } from './scanner'
+import { scanDirectoryIndexedStreaming } from './indexed-scanner'
 import { loadSettings, patchSettings } from './settings'
 import * as os from 'os'
 import {
@@ -26,6 +27,7 @@ import {
   tryBeginBackgroundScan,
   type BackgroundScanLease,
 } from './scan-coordination'
+import { scheduleScanIndexPersistence } from './scan-index'
 
 function isCleanableEntry(e: DiskEntry): boolean {
   return sharedIsCleanable(e, getAppPlatform())
@@ -256,7 +258,7 @@ function scanFolder(
     const currentPlatform = getAppPlatform()
     const scanId = `background-${Date.now()}-${Math.random().toString(36).slice(2)}`
     let cancelScan = (): void => {}
-    cancelScan = scanDirectoryStreaming(
+    cancelScan = scanDirectoryIndexedStreaming(
       dirPath,
       { scanId, rootId: 'root-0', profile: 'background' },
       (event) => {
@@ -382,6 +384,7 @@ export async function runBackgroundScan(): Promise<BackgroundScanRunOutcome> {
 
     const totalKB = allCleanable.reduce((s, e) => s + e.sizeKB, 0)
     const outcome = summarizeBackgroundScan(rootSummaries, dedupedScanPaths.length)
+    scheduleScanIndexPersistence(5_000)
 
     patchSettings({
       backgroundScan: {

@@ -30,6 +30,8 @@ export interface NerionSettings {
   preferredOllamaModel: string | null
   onboardingComplete: boolean
   showDevDependencies: boolean
+  /** Store anonymous scan timing counters locally. Never transmitted. */
+  localPerformanceDiagnostics: boolean
   /** 'cloud' = runtime-configured OpenAI; 'ollama' = local Ollama */
   aiMode: 'cloud' | 'ollama'
   /** Platform-specific quick scan folder identifiers or absolute paths. */
@@ -81,6 +83,7 @@ function buildDefaults(): NerionSettings {
   preferredOllamaModel: null,
   onboardingComplete: false,
   showDevDependencies: false,
+  localPerformanceDiagnostics: false,
   aiMode: 'ollama',
   quickScanFolders: quickScanDefaults,
   customQuickScanFolders: [],
@@ -181,7 +184,7 @@ export function loadSettings(): NerionSettings {
       merged.backgroundScan.lastScanError = null
       mutated = true
     }
-    for (const key of ['showMenuBarIcon', 'autoUpdateEnabled', 'deleteImmediately', 'quickScanTrashConfigured', 'onboardingComplete', 'showDevDependencies'] as const) {
+    for (const key of ['showMenuBarIcon', 'autoUpdateEnabled', 'deleteImmediately', 'quickScanTrashConfigured', 'onboardingComplete', 'showDevDependencies', 'localPerformanceDiagnostics'] as const) {
       if (typeof merged[key] !== 'boolean') {
         merged[key] = defaults[key]
         mutated = true

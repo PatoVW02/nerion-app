@@ -94,6 +94,10 @@ body,
   background: var(--surface-data);
 }
 
+.settings-surface {
+  background: var(--surface-base);
+}
+
 @media (prefers-reduced-transparency: reduce) {
   :root {
     --glass-shell: #09090b;
