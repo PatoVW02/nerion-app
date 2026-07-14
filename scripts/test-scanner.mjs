@@ -12,7 +12,11 @@ const fixture = mkdtempSync(join(tmpdir(), 'nerion-scanner-'))
 try {
   const nested = join(fixture, 'unicode-ñ')
   mkdirSync(nested)
-  const unusual = join(nested, 'tab\tline\nname.txt')
+  // NTFS rejects control characters in file names. Unix integration still
+  // verifies tab/newline round-tripping, while Windows exercises Unicode,
+  // hard-link identity, and the same JSONL protocol with a legal native name.
+  const unusualName = process.platform === 'win32' ? 'unusual-ñame.txt' : 'tab\tline\nname.txt'
+  const unusual = join(nested, unusualName)
   const hardlink = join(nested, 'hardlink.txt')
   writeFileSync(unusual, 'scanner protocol fixture')
   linkSync(unusual, hardlink)
@@ -27,7 +31,7 @@ try {
   assert.equal(summary.scanId, 'integration-scan')
   assert.equal(summary.rootId, 'root-fixture')
   assert.equal(summary.complete, true)
-  assert.ok(entries.some((entry) => entry.path === unusual), 'newline/tab path must round-trip through JSON')
+  assert.ok(entries.some((entry) => entry.path === unusual), 'native Unicode path must round-trip through JSON')
   assert.ok(entries.some((entry) => entry.path === hardlink && entry.hardlinkDuplicate === true), 'hard link must be deduplicated')
   assert.ok(!entries.some((entry) => entry.path.endsWith('ignored-symlink')), 'symlinks must not be followed or emitted')
 } finally {
