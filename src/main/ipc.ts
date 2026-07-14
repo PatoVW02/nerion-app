@@ -5,7 +5,7 @@ import { promisify } from 'node:util'
 import { stat, readdir, realpath } from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { scanDirectoryStreaming } from './scanner'
+import { scanDirectoryIndexedStreaming } from './indexed-scanner'
 import { loadSettings, saveSettings, patchSettings, NerionSettings } from './settings'
 import { rebuildTrayMenu, scheduleBackgroundScan, stopBackgroundScan, runBackgroundScanNow, updateLastScanPath, setTrayVisibility, setQuitting, testNotification } from './background'
 import { getLicenseInfo, activateLicense, startLicenseValidationService, deactivateLicense } from './license'
@@ -22,6 +22,8 @@ import { isAllowedExternalUrl } from './security'
 import { isValidIpcPath, normalizeNonNegativeKilobytes, normalizeRendererSettings, parseOllamaPullRecord } from './runtime-policy'
 import { beginForegroundScan, endForegroundScan } from './scan-coordination'
 import { createBufferedEventSender } from './scan-event-buffer'
+import { invalidateScanIndexesForPaths, scheduleScanIndexPersistence } from './scan-index'
+import { clearLocalScanMetrics } from './scan-performance'
 
 const execFileAsync = promisify(execFile)
 
@@ -915,6 +917,9 @@ export function registerIpcHandlers(): void {
         fatalError: 'No readable scan roots were provided.',
         securityAnalysis: securityEnabled ? 'partial' : 'disabled',
         suspiciousCount: 0,
+        source: 'filesystem',
+        durationMs: 0,
+        journalId: null,
       } satisfies ScanSummaryV1)
       dispatcher.dispose(true)
       endForegroundScan(requestedScanId)
@@ -985,8 +990,12 @@ export function registerIpcHandlers(): void {
           ? (persistence.complete && scanComplete ? 'complete' : 'partial')
           : 'disabled',
         suspiciousCount: suspiciousFindings.size,
+        source: summaries.length > 0 && summaries.every((item) => item.source === 'index') ? 'index' : 'filesystem',
+        durationMs: summaries.reduce((total, item) => total + (item.durationMs ?? 0), 0),
+        journalId: null,
       } satisfies ScanSummaryV1)
       dispatcher.dispose(true)
+      scheduleScanIndexPersistence(1_500)
       cancelCurrentScan = null
       endForegroundScan(requestedScanId)
       currentScanId = null
@@ -1002,7 +1011,7 @@ export function registerIpcHandlers(): void {
       const dirPath = paths[index]
       const rootId = `root-${index}`
       crossRootDuplicateBytes.set(rootId, [])
-      activeCancel = scanDirectoryStreaming(
+      activeCancel = scanDirectoryIndexedStreaming(
         dirPath,
         { scanId: requestedScanId, rootId, profile: 'interactive' },
         (scanEvent) => {
@@ -1145,6 +1154,13 @@ export function registerIpcHandlers(): void {
         }
       })
     }
+    invalidateScanIndexesForPaths(
+      result.items
+        .filter((item) => item.status === 'moved-to-trash'
+          || item.status === 'permanently-removed'
+          || item.status === 'already-missing')
+        .map((item) => item.requestedPath),
+    )
     return result
     } finally {
       deletionInProgress = false
@@ -1465,6 +1481,9 @@ What is this item and is it safe to delete?`
     }
     if (mergedSettings.autoUpdateEnabled && !prev.autoUpdateEnabled) {
       runAutoUpdateCheck('settings-enabled').catch(() => {})
+    }
+    if (!mergedSettings.localPerformanceDiagnostics && prev.localPerformanceDiagnostics) {
+      clearLocalScanMetrics()
     }
     rebuildTrayMenu()
     return mergedSettings

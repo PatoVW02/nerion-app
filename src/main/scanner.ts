@@ -32,6 +32,9 @@ function summary(options: ScanOptions, values: Partial<ScanSummaryV1> = {}): Sca
     fatalError: values.fatalError ?? null,
     securityAnalysis: values.securityAnalysis ?? 'disabled',
     suspiciousCount: values.suspiciousCount ?? 0,
+    source: values.source ?? 'filesystem',
+    durationMs: values.durationMs ?? 0,
+    journalId: values.journalId ?? null,
   }
 }
 
@@ -88,6 +91,7 @@ function parseNativeEvent(line: string, options: ScanOptions): ScanEventV1 | nul
         entryCount: typeof value.entryCount === 'number' ? value.entryCount : 0,
         issueCount: typeof value.issueCount === 'number' ? value.issueCount : 0,
         fatalError: typeof value.fatalError === 'string' ? value.fatalError : null,
+        journalId: typeof value.journalId === 'string' ? value.journalId : null,
       })
     }
   } catch {

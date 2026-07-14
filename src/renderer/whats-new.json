@@ -1,6 +1,33 @@
 {
   "releases": [
     {
+      "version": "1.5.2",
+      "date": "July 2026",
+      "description": "Nerion 1.5.2 makes repeat scans dramatically lighter, keeps very large folders responsive, and gives Settings a focused full-page workspace.",
+      "items": [
+        {
+          "icon": "Zap",
+          "title": "Faster Repeat Scans",
+          "description": "Unchanged folders can reuse a private on-device scan index. macOS change history and live filesystem monitoring automatically send changed or uncertain locations back through a complete scan."
+        },
+        {
+          "icon": "ListChecks",
+          "title": "Responsive Large Folders",
+          "description": "Nerion now renders only visible file rows, limits the treemap to meaningful blocks, and loads dates on demand so folders with thousands of items remain smooth."
+        },
+        {
+          "icon": "Monitor",
+          "title": "Focused Settings",
+          "description": "Settings now uses the same dark workspace as the scan view without showing or exposing the previous screen underneath."
+        },
+        {
+          "icon": "Shield",
+          "title": "Private Performance Diagnostics",
+          "description": "An optional local-only diagnostic records scan timing, item counts, and index usage without file names or paths, and is erased when disabled."
+        }
+      ]
+    },
+    {
       "version": "1.5.1",
       "date": "July 2026",
       "description": "Nerion 1.5.1 makes large scans gentler on your computer, adds a secure OpenAI option alongside Ollama, and gives background cleanup and app-leftover review more precise results.",

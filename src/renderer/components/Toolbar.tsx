@@ -12,6 +12,8 @@ export function Toolbar({ onSettingsOpen }: ToolbarProps) {
         Nerion
       </span>
       <button
+        type="button"
+        aria-label="Open Settings"
         onClick={onSettingsOpen}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-500 hover:text-zinc-200 transition-colors"

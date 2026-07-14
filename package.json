@@ -1,6 +1,6 @@
 {
   "name": "nerion",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Cross-platform disk space analyzer",
   "author": "patovw",
   "email": "hey@patovw.com",
@@ -136,5 +136,8 @@
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true,
     "fsevents@2.3.3": true
+  },
+  "optionalDependencies": {
+    "fsevents": "^2.3.3"
   }
 }

@@ -66,6 +66,7 @@ export interface NerionSettings {
   preferredOllamaModel: string | null
   onboardingComplete: boolean
   showDevDependencies: boolean
+  localPerformanceDiagnostics: boolean
   /** 'cloud' = runtime-configured OpenAI; 'ollama' = local Ollama */
   aiMode: 'cloud' | 'ollama'
   /** Folder names (relative to ~/Library) included in Quick Scan mode. */

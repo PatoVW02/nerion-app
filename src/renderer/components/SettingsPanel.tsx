@@ -133,11 +133,14 @@ function fmtDate(value: string | null | undefined): string | null {
   }).format(date)
 }
 
-function Toggle({ on, onClick, disabled }: { on: boolean; onClick: () => void; disabled?: boolean }) {
+function Toggle({ on, onClick, label, disabled }: { on: boolean; onClick: () => void; label: string; disabled?: boolean }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      type="button"
+      aria-label={label}
+      aria-pressed={on}
       className={[
         'relative w-11 h-6 rounded-full transition-colors duration-200 shrink-0 mt-0.5 disabled:opacity-50',
         on ? 'bg-blue-600' : 'bg-zinc-700'
@@ -152,6 +155,7 @@ function Toggle({ on, onClick, disabled }: { on: boolean; onClick: () => void; d
 }
 
 export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, quickScanFolders, onQuickScanFoldersChange, platformInfo, isPremium, license, onUpgrade, onLicense, onWhatsNew, activeTabOverride = null }: SettingsPanelProps) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
   const [activeTab, setActiveTab] = useState<SettingsTab>('general')
   const [settings, setSettings] = useState<NerionSettings | null>(null)
   const [saving, setSaving] = useState(false)
@@ -189,6 +193,25 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
   const [pullStatus, setPullStatus] = useState('')
   const [pullError, setPullError] = useState<string | null>(null)
   const quickFolderOptions = platformInfo?.quickScanOptions ?? []
+
+  useEffect(() => {
+    const appRoot = document.getElementById('root')
+    const hadInert = appRoot?.hasAttribute('inert') ?? false
+    const previousAriaHidden = appRoot?.getAttribute('aria-hidden') ?? null
+    appRoot?.setAttribute('inert', '')
+    appRoot?.setAttribute('aria-hidden', 'true')
+    closeButtonRef.current?.focus()
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      if (!hadInert) appRoot?.removeAttribute('inert')
+      if (previousAriaHidden === null) appRoot?.removeAttribute('aria-hidden')
+      else appRoot?.setAttribute('aria-hidden', previousAriaHidden)
+    }
+  }, [onClose])
 
   useEffect(() => {
     if (activeTabOverride) setActiveTab(activeTabOverride)
@@ -470,6 +493,13 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     await window.electronAPI.saveSettings(next)
   }
 
+  async function toggleLocalPerformanceDiagnostics() {
+    if (!settings) return
+    const next = { ...settings, localPerformanceDiagnostics: !settings.localPerformanceDiagnostics }
+    setSettings(next)
+    await window.electronAPI.saveSettings(next)
+  }
+
   async function toggleDeleteMode() {
     if (!settings) return
     const next = { ...settings, deleteImmediately: !settings.deleteImmediately }
@@ -617,13 +647,18 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
 
   return createPortal(
     <div
-      className="glass-overlay fixed inset-0 z-50 flex flex-col"
+      className="settings-surface fixed inset-0 z-50 flex flex-col"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="nerion-settings-title"
       style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
     >
       {/* Header */}
       <HeaderFrame>
         <button
+          ref={closeButtonRef}
           onClick={onClose}
+          aria-label="Close Settings"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-500 hover:text-zinc-200 transition-colors"
         >
@@ -631,17 +666,19 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
         </button>
-        <h1 className="text-zinc-500 text-xs font-medium tracking-widest uppercase select-none">Settings</h1>
+        <h1 id="nerion-settings-title" className="text-zinc-500 text-xs font-medium tracking-widest uppercase select-none">Settings</h1>
       </HeaderFrame>
 
       {/* Tabs */}
       <div className="shrink-0 px-5 pt-4 pb-2.5">
         <div className="w-full overflow-x-auto scrollbar-dark">
-          <div className="flex items-center justify-center gap-1.5 min-w-max mx-auto">
+          <div role="tablist" aria-label="Settings sections" className="flex items-center justify-center gap-1.5 min-w-max mx-auto">
             {SETTINGS_TABS.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
+                role="tab"
+                aria-selected={activeTab === tab.id}
                 className={[
                   'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors inline-flex items-center gap-1.5',
                   activeTab === tab.id
@@ -752,7 +789,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   Scan your computer periodically and send a notification when there's space to reclaim.
                 </p>
               </div>
-              <Toggle on={!!bg?.enabled} onClick={toggleBgEnabled} disabled={saving} />
+              <Toggle on={!!bg?.enabled} onClick={toggleBgEnabled} label="Automatic background scanning" disabled={saving} />
             </div>
 
             <div className={['flex items-center justify-between gap-4 px-4 py-3.5 transition-opacity', !bg?.enabled ? 'opacity-40 pointer-events-none' : ''].join(' ')}>
@@ -834,7 +871,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   Explains files and recommends what's safe to delete.
                 </p>
               </div>
-              <Toggle on={aiEnabled} onClick={toggleAI} />
+              <Toggle on={aiEnabled} onClick={toggleAI} label="AI analysis" />
             </div>
 
             {/* AI mode selector */}
@@ -1121,7 +1158,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                         Development dependencies are always shown in Smart Clean. Enable this to pre-select <span className="font-mono text-zinc-400">node_modules</span>, virtual environments, and other dev artifacts automatically.
                       </p>
                     </div>
-                    <Toggle on={!!settings?.showDevDependencies} onClick={toggleDevDeps} />
+                    <Toggle on={!!settings?.showDevDependencies} onClick={toggleDevDeps} label="Auto-select development dependencies" />
                   </div>
                 </div>
               </div>
@@ -1136,7 +1173,27 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                         Permanently deletes selected items instead of moving them to the Trash. Use with caution: deleted items cannot be restored from Trash.
                       </p>
                     </div>
-                    <Toggle on={!!settings?.deleteImmediately} onClick={toggleDeleteMode} />
+                    <Toggle on={!!settings?.deleteImmediately} onClick={toggleDeleteMode} label="Delete items immediately" />
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-3">Performance</p>
+                <div className="rounded-xl bg-white/[0.03] border border-white/[0.06]">
+                  <div className="flex items-start justify-between gap-4 px-4 py-4">
+                    <div className="min-w-0">
+                      <p className="text-sm text-zinc-200 font-medium">Keep local scan diagnostics</p>
+                      <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
+                        Records scan duration, item counts, and index usage on this computer to help diagnose slow scans. File names and paths are never included or transmitted.
+                      </p>
+                    </div>
+                    <Toggle
+                      on={!!settings?.localPerformanceDiagnostics}
+                      onClick={toggleLocalPerformanceDiagnostics}
+                      label="Keep local scan diagnostics"
+                      disabled={!settings}
+                    />
                   </div>
                 </div>
               </div>
@@ -1369,7 +1426,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   {platformInfo?.startupDescription ?? 'Launch Nerion in the background when your computer starts so background scans can run without opening the app.'}
                 </p>
               </div>
-              <Toggle on={!!loginItem} onClick={toggleLoginItem} disabled={loginItem === null} />
+              <Toggle on={!!loginItem} onClick={toggleLoginItem} label="Open Nerion at startup" disabled={loginItem === null} />
             </div>
           </div>
         </section>
@@ -1389,7 +1446,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   Automatically updates when a newer version is available.
                 </p>
               </div>
-              <Toggle on={!!settings?.autoUpdateEnabled} onClick={toggleAutoUpdate} disabled={!settings} />
+              <Toggle on={!!settings?.autoUpdateEnabled} onClick={toggleAutoUpdate} label="Automatically update Nerion" disabled={!settings} />
             </div>
             <div className="px-4 py-4">
               <button
@@ -1492,7 +1549,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   {bg?.enabled ? ' Required while background scans are on.' : ''}
                 </p>
               </div>
-              <Toggle on={!!settings?.showMenuBarIcon} onClick={toggleMenuBarIcon} disabled={!!bg?.enabled} />
+              <Toggle on={!!settings?.showMenuBarIcon} onClick={toggleMenuBarIcon} label={platformInfo?.id === 'windows' ? 'Show Nerion in the system tray' : 'Show Nerion in the menu bar'} disabled={!!bg?.enabled} />
             </div>
           </div>
         </section>

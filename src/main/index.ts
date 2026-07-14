@@ -8,6 +8,7 @@ import { loadSettings } from './settings'
 import { runAutoUpdateCheck, scheduleAutoUpdateChecks, stopAutoUpdateChecks } from './updater'
 import { applyWindowMaterial, getAppPlatform, getWindowOptions, hideDock, shouldKeepAppAliveOnWindowClose, showDock } from './platform'
 import { isAllowedExternalUrl, isTrustedRendererNavigation } from './security'
+import { configureScanIndex, disposeScanIndexes } from './scan-index'
 
 let mainWindow: BrowserWindow | null = null
 let lastRendererRecoveryAt = 0
@@ -141,6 +142,7 @@ app.on('before-quit', () => {
   stopAutoUpdateChecks()
   disposeIpcRuntime()
   disposeBackgroundServices()
+  disposeScanIndexes()
 })
 
 void app.whenReady().then(() => {
@@ -156,6 +158,7 @@ void app.whenReady().then(() => {
 
   app.on('browser-window-created', (_, w) => optimizer.watchWindowShortcuts(w))
 
+  configureScanIndex(join(app.getPath('userData'), 'scan-index-v1'))
   registerIpcHandlers()
   const trayReady = initTray(() => mainWindow)
   const loginItemSettings = app.getLoginItemSettings()

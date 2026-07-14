@@ -26,6 +26,22 @@ use windows_sys::Win32::System::Threading::{
 
 const PROTOCOL_VERSION: u8 = 1;
 
+#[cfg(target_os = "macos")]
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    fn FSEventsGetCurrentEventId() -> u64;
+}
+
+#[cfg(target_os = "macos")]
+fn current_journal_id() -> Option<u64> {
+    Some(unsafe { FSEventsGetCurrentEventId() })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_journal_id() -> Option<u64> {
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScanProfile {
     Interactive,
@@ -70,6 +86,7 @@ struct ScanContext<'a, W: Write> {
     entry_count: u64,
     issue_count: u64,
     profile: ScanProfile,
+    journal_id: Option<u64>,
 }
 
 fn json_string(value: &str) -> String {
@@ -199,14 +216,19 @@ impl<W: Write> ScanContext<'_, W> {
 
     fn write_summary(&mut self) {
         let complete = self.issue_count == 0;
+        let journal_id = self
+            .journal_id
+            .map(|value| json_string(&value.to_string()))
+            .unwrap_or_else(|| "null".to_string());
         let line = format!(
-            "{{\"protocolVersion\":{},\"event\":\"summary\",\"scanId\":{},\"rootId\":{},\"complete\":{},\"cancelled\":false,\"entryCount\":{},\"issueCount\":{},\"rootsCompleted\":1,\"rootsRequested\":1,\"fatalError\":null}}",
+            "{{\"protocolVersion\":{},\"event\":\"summary\",\"scanId\":{},\"rootId\":{},\"complete\":{},\"cancelled\":false,\"entryCount\":{},\"issueCount\":{},\"rootsCompleted\":1,\"rootsRequested\":1,\"fatalError\":null,\"journalId\":{}}}",
             PROTOCOL_VERSION,
             json_string(self.scan_id),
             json_string(self.root_id),
             complete,
             self.entry_count,
             self.issue_count,
+            journal_id,
         );
         let _ = writeln!(self.writer, "{}", line);
         let _ = self.writer.flush();
@@ -362,6 +384,10 @@ fn main() {
     let profile = ScanProfile::parse(args.next().as_deref().and_then(|value| value.to_str()));
     apply_process_priority(profile);
 
+    // Capture the journal cursor before traversal. FSEvents can then replay
+    // every mutation that raced with the scan instead of trusting a mixed
+    // point-in-time result.
+    let journal_id = current_journal_id();
     let stdout = io::stdout();
     let mut context = ScanContext {
         scan_id: &scan_id,
@@ -371,6 +397,7 @@ fn main() {
         entry_count: 0,
         issue_count: 0,
         profile,
+        journal_id,
     };
 
     if target.to_str().is_none() {
@@ -454,6 +481,7 @@ mod tests {
             entry_count: 0,
             issue_count: 0,
             profile: ScanProfile::Interactive,
+            journal_id: None,
         };
         let root_path = root.to_str().expect("valid root path");
 

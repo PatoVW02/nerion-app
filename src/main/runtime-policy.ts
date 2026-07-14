@@ -124,6 +124,7 @@ export function normalizeRendererSettings(
     preferredOllamaModel: asNullableModel(input.preferredOllamaModel, previous.preferredOllamaModel),
     onboardingComplete: asBoolean(input.onboardingComplete, previous.onboardingComplete),
     showDevDependencies: asBoolean(input.showDevDependencies, previous.showDevDependencies),
+    localPerformanceDiagnostics: asBoolean(input.localPerformanceDiagnostics, previous.localPerformanceDiagnostics),
     aiMode: requestedAiMode,
     quickScanFolders,
     customQuickScanFolders: options.premium
