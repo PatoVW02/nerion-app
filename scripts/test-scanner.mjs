@@ -3,8 +3,9 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, linkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const projectRoot = new URL('..', import.meta.url).pathname
+const projectRoot = fileURLToPath(new URL('..', import.meta.url))
 const binary = process.env.NERION_SCANNER_BINARY
   ?? join(projectRoot, 'native', 'scanner-rs', 'target', 'debug', process.platform === 'win32' ? 'scanner-bin.exe' : 'scanner-bin')
 const fixture = mkdtempSync(join(tmpdir(), 'nerion-scanner-'))
