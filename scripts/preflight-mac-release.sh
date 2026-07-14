@@ -66,14 +66,15 @@ if [[ "$(git rev-parse HEAD)" != "${remote_default_sha}" ]]; then
 fi
 
 if ! action_variables="$(gh variable list --repo "${repo_name}" --json name --jq '.[].name' 2>&1)"; then
-  echo "Could not inspect GitHub Actions variables for ${repo_name}. Ensure this token can read repository Actions settings, or configure them in GitHub before releasing." >&2
-  echo "${action_variables}" >&2
-  exit 1
-fi
-if ! action_secrets="$(gh secret list --repo "${repo_name}" --app actions --json name --jq '.[].name' 2>&1)"; then
-  echo "Could not inspect GitHub Actions secrets for ${repo_name}. Ensure this token can read repository Actions settings, or configure them in GitHub before releasing." >&2
-  echo "${action_secrets}" >&2
-  exit 1
+  token_error="${action_variables}"
+  if [[ -n "${GH_TOKEN:-}" ]] && action_variables="$(env -u GH_TOKEN gh variable list --repo "${repo_name}" --json name --jq '.[].name' 2>&1)"; then
+    echo "GH_TOKEN cannot inspect Actions variables; using the authenticated GitHub CLI keyring for preflight checks."
+  else
+    echo "Could not inspect GitHub Actions variables for ${repo_name}. Ensure GitHub CLI can read repository Actions settings, or configure them in GitHub before releasing." >&2
+    echo "${token_error}" >&2
+    echo "${action_variables}" >&2
+    exit 1
+  fi
 fi
 
 required_action_variables=(
@@ -82,30 +83,15 @@ required_action_variables=(
   VITE_MONTHLY_VARIANT_ID
   VITE_LIFETIME_VARIANT_ID
 )
-required_action_secrets=(
-  WINDOWS_CSC_LINK
-  WINDOWS_CSC_KEY_PASSWORD
-)
 missing_action_variables=()
-missing_action_secrets=()
 
 for name in "${required_action_variables[@]}"; do
   if ! grep -Fxq "${name}" <<< "${action_variables}"; then
     missing_action_variables+=("${name}")
   fi
 done
-for name in "${required_action_secrets[@]}"; do
-  if ! grep -Fxq "${name}" <<< "${action_secrets}"; then
-    missing_action_secrets+=("${name}")
-  fi
-done
-
 if (( ${#missing_action_variables[@]} > 0 )); then
   echo "Missing required GitHub Actions variables: ${missing_action_variables[*]}" >&2
-  exit 1
-fi
-if (( ${#missing_action_secrets[@]} > 0 )); then
-  echo "Missing required GitHub Actions secrets: ${missing_action_secrets[*]}" >&2
   exit 1
 fi
 
@@ -156,4 +142,4 @@ if ! xcrun notarytool history \
   exit 1
 fi
 
-echo "Default branch, release configuration, signing identity, and notarization credentials are ready."
+echo "Default branch, billing configuration, macOS signing identity, and notarization credentials are ready."

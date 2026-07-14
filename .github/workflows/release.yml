@@ -55,14 +55,22 @@ jobs:
       - name: Verify billing build configuration
         run: node scripts/validate-checkout-urls.mjs
 
-      - name: Require Windows Authenticode credentials
+      - name: Detect optional Windows Authenticode credentials
         shell: pwsh
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:CSC_LINK)) {
-            throw "WINDOWS_CSC_LINK is required; refusing to publish an unsigned Windows build."
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:CSC_LINK)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)
+          if ($hasCertificate -xor $hasPassword) {
+            throw "Configure both WINDOWS_CSC_LINK and WINDOWS_CSC_KEY_PASSWORD, or leave both unset for an unsigned Windows build."
           }
-          if ([string]::IsNullOrWhiteSpace($env:CSC_KEY_PASSWORD)) {
-            throw "WINDOWS_CSC_KEY_PASSWORD is required; refusing to publish an unsigned Windows build."
+          $signingEnabled = $hasCertificate -and $hasPassword
+          $signingValue = $signingEnabled.ToString().ToLowerInvariant()
+          "WINDOWS_SIGNING_ENABLED=$signingValue" >> $env:GITHUB_ENV
+          "CSC_IDENTITY_AUTO_DISCOVERY=$signingValue" >> $env:GITHUB_ENV
+          if ($signingEnabled) {
+            Write-Host "Windows Authenticode signing is enabled."
+          } else {
+            Write-Warning "Windows certificate is not configured; publishing an unsigned installer."
           }
 
       - name: Build Windows scanner
@@ -75,6 +83,7 @@ jobs:
         run: npx electron-builder --win nsis --x64 --publish never
 
       - name: Verify Authenticode signatures
+        if: env.WINDOWS_SIGNING_ENABLED == 'true'
         shell: pwsh
         run: |
           $signedFiles = @(
