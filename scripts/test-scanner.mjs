@@ -33,7 +33,11 @@ try {
   assert.equal(summary.rootId, 'root-fixture')
   assert.equal(summary.complete, true)
   assert.ok(entries.some((entry) => entry.path === unusual), 'native Unicode path must round-trip through JSON')
-  assert.ok(entries.some((entry) => entry.path === hardlink && entry.hardlinkDuplicate === true), 'hard link must be deduplicated')
+  const linkedEntries = entries.filter((entry) => entry.path === unusual || entry.path === hardlink)
+  assert.equal(linkedEntries.length, 2, 'both hard-link names must be reported')
+  assert.equal(linkedEntries.filter((entry) => entry.hardlinkDuplicate === true).length, 1, 'exactly one hard-link name must be deduplicated')
+  assert.equal(linkedEntries.find((entry) => entry.hardlinkDuplicate === true)?.allocatedBytes, 0, 'the duplicate must not be double-counted')
+  assert.equal(new Set(linkedEntries.map((entry) => `${entry.device}:${entry.inode}`)).size, 1, 'hard-link names must share one native identity')
   assert.ok(!entries.some((entry) => entry.path.endsWith('ignored-symlink')), 'symlinks must not be followed or emitted')
 } finally {
   rmSync(fixture, { recursive: true, force: true })

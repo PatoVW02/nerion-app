@@ -363,7 +363,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn hard_links_share_the_same_file_identity() {
         let root = env::temp_dir().join(format!("nerion-scanner-test-{}", std::process::id()));
