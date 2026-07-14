@@ -122,7 +122,7 @@ export function getSuspiciousPersistenceRoots(
     ]
   }
   return [
-    path.join(homeDirectory, 'Library', 'LaunchAgents'),
+    path.posix.join(homeDirectory, 'Library', 'LaunchAgents'),
     '/Library/LaunchAgents',
     '/Library/LaunchDaemons',
   ]
@@ -130,35 +130,43 @@ export function getSuspiciousPersistenceRoots(
 
 function isAppleLaunchItem(itemPath: string, config: LaunchConfiguration): boolean {
   const label = typeof config.Label === 'string' ? config.Label.toLocaleLowerCase('en-US') : ''
-  const filename = path.basename(itemPath).toLocaleLowerCase('en-US')
+  const filename = path.posix.basename(itemPath).toLocaleLowerCase('en-US')
   return label.startsWith('com.apple.')
     || filename.startsWith('com.apple.')
     || label === 'com.patricio.nerion'
     || filename === 'com.patricio.nerion.plist'
 }
 
-function expandHome(value: string, homeDirectory: string): string {
+function expandHome(value: string, homeDirectory: string, platform: AppPlatform): string {
   if (value === '~') return homeDirectory
-  if (value.startsWith('~/') || value.startsWith('~\\')) return path.join(homeDirectory, value.slice(2))
+  if (value.startsWith('~/') || value.startsWith('~\\')) {
+    const pathApi = platform === 'windows' ? path.win32 : path.posix
+    return pathApi.join(homeDirectory, value.slice(2))
+  }
   return value
 }
 
-export function extractLaunchTarget(config: LaunchConfiguration, homeDirectory: string): string | null {
+export function extractLaunchTarget(
+  config: LaunchConfiguration,
+  homeDirectory: string,
+  platform: AppPlatform = 'macos',
+): string | null {
   const args = Array.isArray(config.ProgramArguments)
     ? config.ProgramArguments.filter((value): value is string => typeof value === 'string' && value.length > 0)
     : []
   const program = typeof config.Program === 'string' && config.Program.length > 0 ? config.Program : args[0]
   if (!program) return null
 
-  const expandedProgram = expandHome(program, homeDirectory)
-  if (!INTERPRETER_NAMES.has(path.basename(expandedProgram).toLocaleLowerCase('en-US'))) return expandedProgram
+  const pathApi = platform === 'windows' ? path.win32 : path.posix
+  const expandedProgram = expandHome(program, homeDirectory, platform)
+  if (!INTERPRETER_NAMES.has(pathApi.basename(expandedProgram).toLocaleLowerCase('en-US'))) return expandedProgram
 
   const payload = args.slice(args[0] === program ? 1 : 0).find((argument) => {
     if (argument.startsWith('-')) return false
-    const expanded = expandHome(argument, homeDirectory)
-    return path.isAbsolute(expanded) || argument.startsWith('~')
+    const expanded = expandHome(argument, homeDirectory, platform)
+    return pathApi.isAbsolute(expanded) || argument.startsWith('~')
   })
-  return payload ? expandHome(payload, homeDirectory) : expandedProgram
+  return payload ? expandHome(payload, homeDirectory, platform) : expandedProgram
 }
 
 export function isRiskyPersistenceTarget(targetPath: string, homeDirectory: string, platform: AppPlatform): boolean {
@@ -169,10 +177,10 @@ export function isRiskyPersistenceTarget(targetPath: string, homeDirectory: stri
         path.win32.join(homeDirectory, 'AppData', 'Local', 'Temp'),
       ]
     : [
-        path.join(homeDirectory, 'Desktop'),
-        path.join(homeDirectory, 'Downloads'),
-        path.join(homeDirectory, '.Trash'),
-        path.join(homeDirectory, 'Library', 'Caches'),
+        path.posix.join(homeDirectory, 'Desktop'),
+        path.posix.join(homeDirectory, 'Downloads'),
+        path.posix.join(homeDirectory, '.Trash'),
+        path.posix.join(homeDirectory, 'Library', 'Caches'),
         '/private/tmp',
         '/tmp',
       ]
@@ -247,7 +255,7 @@ export async function classifyLaunchConfiguration(
   let risk: SuspiciousFinding['risk'] = 'review'
   if (!targetPath) {
     findingEvidence.push(evidence('invalid-config', 'No executable target could be identified'))
-  } else if (!path.isAbsolute(targetPath)) {
+  } else if (!path.posix.isAbsolute(targetPath)) {
     findingEvidence.push(evidence('invalid-config', 'Startup target is not an absolute path', targetPath))
   } else {
     if (isRiskyPersistenceTarget(targetPath, homeDirectory, 'macos')) {
@@ -315,7 +323,7 @@ async function inspectMacPersistenceRoot(rootPath: string, homeDirectory: string
     const entries = await fsp.readdir(rootPath, { withFileTypes: true })
     for (const entry of entries) {
       if ((!entry.isFile() && !entry.isSymbolicLink()) || !entry.name.toLocaleLowerCase('en-US').endsWith('.plist')) continue
-      const itemPath = path.join(rootPath, entry.name)
+      const itemPath = path.posix.join(rootPath, entry.name)
       try {
         const stats = await fsp.lstat(itemPath)
         const bytes = allocatedBytes(stats)

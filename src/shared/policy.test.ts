@@ -29,6 +29,7 @@ describe('deletion path policy', () => {
     expect(isContentOnlyProtectedRoot('D:\\$Recycle.Bin', 'windows', home)).toBe(true)
     expect(isCriticalPath('D:\\Temp\\..\\Windows\\System32', 'windows', home)).toBe(true)
     expect(isCriticalPath('Windows\\System32', 'windows', home)).toBe(true)
+    expect(isCriticalPath('\\tmp\\nerion-delete-fixture', 'windows', home)).toBe(true)
     expect(isCriticalPath('\\\\?\\C:\\Windows\\System32', 'windows', home)).toBe(true)
     expect(isCriticalPath('\\\\.\\C:\\Windows\\System32', 'windows', home)).toBe(true)
     expect(isCriticalPath('\\\\localhost\\C$\\Windows\\System32', 'windows', home)).toBe(true)

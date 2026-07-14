@@ -1,6 +1,8 @@
-import { existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AppPlatform } from '../shared/platform'
 
 vi.mock('electron', () => ({ shell: { trashItem: vi.fn() } }))
 
@@ -8,10 +10,20 @@ import { shell } from 'electron'
 import { deleteRequestedPaths, isAlreadyInTrash } from './deletion'
 
 let fixture = ''
+const runtimePlatform: AppPlatform = process.platform === 'win32' ? 'windows' : 'macos'
+
+function createFixture(): string {
+  // Windows treats `/tmp/...` as drive-relative rather than absolute. Use its
+  // native temporary directory and resolve any 8.3 alias so the symlink/junction
+  // safety check compares the same canonical spelling returned by realpath.
+  const temporaryRoot = process.platform === 'win32' ? tmpdir() : '/tmp'
+  const created = mkdtempSync(join(temporaryRoot, 'nerion-delete-'))
+  return process.platform === 'win32' ? realpathSync(created) : created
+}
 
 describe('structured deletion', () => {
   beforeEach(() => {
-    fixture = mkdtempSync('/tmp/nerion-delete-')
+    fixture = createFixture()
     vi.mocked(shell.trashItem).mockReset()
   })
 
@@ -99,7 +111,7 @@ describe('structured deletion', () => {
       deleteImmediately: false,
       premium: false,
       remainingQuota: 1,
-      platform: 'macos',
+      platform: runtimePlatform,
       homeDir: fixture,
     })
 
@@ -120,7 +132,7 @@ describe('structured deletion', () => {
       deleteImmediately: false,
       premium: false,
       remainingQuota: 1,
-      platform: 'macos',
+      platform: runtimePlatform,
       homeDir: fixture,
     })
 
@@ -176,19 +188,26 @@ describe('structured deletion', () => {
   })
 
   it('rejects a request that reaches a protected location through an ancestor symlink', async () => {
-    const keychains = join(fixture, 'Library', 'Keychains')
-    const secret = join(keychains, 'secret.db')
-    const alias = join(fixture, 'alias')
-    mkdirSync(keychains, { recursive: true })
+    const protectedHome = join(fixture, 'home')
+    const protectedDirectory = runtimePlatform === 'windows'
+      ? join(protectedHome, 'AppData')
+      : join(protectedHome, 'Library', 'Keychains')
+    const secret = join(protectedDirectory, 'secret.db')
+    const alias = join(fixture, 'alias-home')
+    mkdirSync(protectedDirectory, { recursive: true })
     writeFileSync(secret, 'secret')
-    symlinkSync(keychains, alias, 'dir')
+    symlinkSync(protectedHome, alias, runtimePlatform === 'windows' ? 'junction' : 'dir')
 
-    const result = await deleteRequestedPaths([join(alias, 'secret.db')], {
+    const requestedPath = runtimePlatform === 'windows'
+      ? join(alias, 'AppData')
+      : join(alias, 'Library', 'Keychains', 'secret.db')
+
+    const result = await deleteRequestedPaths([requestedPath], {
       deleteImmediately: true,
       premium: true,
       remainingQuota: 0,
-      platform: 'macos',
-      homeDir: fixture,
+      platform: runtimePlatform,
+      homeDir: protectedHome,
     })
 
     expect(result.items[0].status).toBe('protected')

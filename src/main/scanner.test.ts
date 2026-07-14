@@ -49,7 +49,7 @@ describe('Node scanner fallback', () => {
     const root = fixture()
     const nested = join(root, 'unicode-ñ')
     mkdirSync(nested)
-    const unusual = join(nested, 'tab\tline\nname.txt')
+    const unusual = join(nested, 'unusual-ñame.txt')
     const hardlink = join(nested, 'hardlink.txt')
     const sparse = join(nested, 'sparse.bin')
     writeFileSync(unusual, 'fallback protocol fixture')
@@ -66,10 +66,30 @@ describe('Node scanner fallback', () => {
     expect(entries.some((entry) => entry.path === unusual)).toBe(true)
     expect(linkedEntries).toHaveLength(2)
     expect(linkedEntries.filter((entry) => entry.hardlinkDuplicate)).toHaveLength(1)
+    expect(linkedEntries.find((entry) => !entry.hardlinkDuplicate)?.allocatedBytes).toBeGreaterThan(0)
     expect(linkedEntries.find((entry) => entry.hardlinkDuplicate)?.allocatedBytes).toBe(0)
     expect(new Set(linkedEntries.map((entry) => `${entry.device}:${entry.inode}`)).size).toBe(1)
     expect(entries.some((entry) => entry.path.endsWith('ignored-symlink'))).toBe(false)
-    expect(entries.find((entry) => entry.path === sparse)?.allocatedBytes).toBe(lstatSync(sparse).blocks * 512)
+    const sparseStats = lstatSync(sparse)
+    const expectedSparseBytes = process.platform === 'win32'
+      ? Number(sparseStats.size)
+      : typeof sparseStats.blocks === 'number' ? sparseStats.blocks * 512 : Number(sparseStats.size)
+    expect(entries.find((entry) => entry.path === sparse)?.allocatedBytes).toBe(expectedSparseBytes)
+  })
+
+  it.skipIf(process.platform === 'win32')('preserves tabs and newlines in names on filesystems that support them', async () => {
+    const root = fixture()
+    const unusual = join(root, 'tab\tline\nname.txt')
+    writeFileSync(unusual, 'fallback protocol fixture')
+
+    const result = await scan(root)
+    const entries = result.events.filter((event) => event.event === 'entry')
+
+    expect(result.summary).toMatchObject({ complete: true, cancelled: false, issueCount: 0 })
+    expect(entries).toContainEqual(expect.objectContaining({
+      name: 'tab\tline\nname.txt',
+      path: unusual,
+    }))
   })
 
   it('rejects byte names that cannot round-trip through UTF-8', () => {

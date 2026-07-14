@@ -37,15 +37,26 @@ export function isAlreadyInTrash(itemPath: string, currentPlatform: AppPlatform)
   return isSameOrDescendantPath(key, trash, currentPlatform)
 }
 
-async function allocatedBytes(itemPath: string, seen = new Set<string>()): Promise<number> {
+function allocatedBytesForStats(
+  stats: Awaited<ReturnType<typeof fsp.lstat>>,
+  currentPlatform: AppPlatform,
+): number {
+  // Node reports `blocks = 0` for ordinary files on Windows. The native scanner
+  // uses GetCompressedFileSizeW for exact allocation data, but deletion must
+  // still return a useful non-zero fallback if only Node metadata is available.
+  if (currentPlatform === 'windows') return Number(stats.size)
+  return typeof stats.blocks === 'number' ? stats.blocks * 512 : Number(stats.size)
+}
+
+async function allocatedBytes(itemPath: string, currentPlatform: AppPlatform, seen = new Set<string>()): Promise<number> {
   const hardLinks = new Map<string, { bytes: number; linkCount: number; occurrences: number }>()
 
   const walk = async (currentPath: string): Promise<number> => {
     const stats = await fsp.lstat(currentPath)
     if (stats.isSymbolicLink()) return 0
-    // A valid zero block count represents a sparse/unallocated file. Falling
-    // back to logical size in that case would overstate reclaimed disk space.
-    const ownBytes = typeof stats.blocks === 'number' ? stats.blocks * 512 : Number(stats.size)
+    // On Unix a valid zero block count represents a sparse/unallocated file.
+    // Falling back to logical size there would overstate reclaimed disk space.
+    const ownBytes = allocatedBytesForStats(stats, currentPlatform)
     if (stats.isFile()) {
       const identity = `${stats.dev}:${stats.ino}`
       if (seen.has(identity)) return 0
@@ -103,10 +114,15 @@ function expectedResolvedPath(itemPath: string, currentPlatform: AppPlatform): s
   return itemPath
 }
 
-async function removeOne(itemPath: string, immediate: boolean, seenHardLinks: Set<string>): Promise<{ operation: DeleteChildOperation; bytes: number }> {
+async function removeOne(
+  itemPath: string,
+  immediate: boolean,
+  currentPlatform: AppPlatform,
+  seenHardLinks: Set<string>,
+): Promise<{ operation: DeleteChildOperation; bytes: number }> {
   let bytes = 0
   try {
-    bytes = await allocatedBytes(itemPath, seenHardLinks)
+    bytes = await allocatedBytes(itemPath, currentPlatform, seenHardLinks)
   } catch (error) {
     if (isMissing(error)) {
       return { operation: { path: itemPath, status: 'already-missing', error: null }, bytes: 0 }
@@ -256,7 +272,7 @@ export async function deleteRequestedPaths(requestedPaths: string[], options: De
     let movedToTrashBytes = 0
     for (const target of targets) {
       const immediate = options.deleteImmediately || isAlreadyInTrash(target, currentPlatform)
-      const { operation, bytes } = await removeOne(target, immediate, seenHardLinks)
+      const { operation, bytes } = await removeOne(target, immediate, currentPlatform, seenHardLinks)
       operations.push(operation)
       if (operation.status === 'permanently-removed') reclaimedBytes += bytes
       if (operation.status === 'moved-to-trash') movedToTrashBytes += bytes

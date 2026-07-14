@@ -157,8 +157,10 @@ export async function runAutoUpdateCheck(reason: 'startup' | 'settings-enabled' 
       // channels select architecture-specific metadata, not release maturity,
       // so an older GitHub release must never replace a newer installed build.
       autoUpdater.channel = channel
-      autoUpdater.allowDowngrade = false
     }
+    // Keep this explicit on Windows as well, where the updater uses the default
+    // latest.yml channel instead of architecture-specific macOS metadata.
+    autoUpdater.allowDowngrade = false
     downloadedUpdateReady = false
 
     console.log(`[Nerion] Auto-update check (${reason}): channel=${autoUpdater.channel ?? 'default'}, checking from ${currentVersion}.`)

@@ -188,6 +188,7 @@ function spawnNodeFallback(
   let entryCount = 0
   let issueCount = 0
   const seenHardlinks = new Set<string>()
+  const currentPlatform = getAppPlatform()
 
   const emitIssue = (itemPath: string, code: ScanIssue['code'], message: string) => {
     issueCount += 1
@@ -203,6 +204,10 @@ function spawnNodeFallback(
   }
 
   const allocatedBytes = (stats: Awaited<ReturnType<typeof fsp.lstat>>): number => {
+    // Node exposes zero blocks for ordinary Windows files. The packaged native
+    // scanner uses GetCompressedFileSizeW; logical size is the closest safe
+    // fallback when that binary is unavailable.
+    if (currentPlatform === 'windows') return Number(stats.size)
     return typeof stats.blocks === 'number' ? stats.blocks * 512 : Number(stats.size)
   }
 

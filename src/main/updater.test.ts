@@ -52,7 +52,11 @@ describe('auto updater runtime behavior', () => {
     mocks.updater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '1.4.7' } })
 
     await expect(runAutoUpdateCheck('manual')).resolves.toBe(false)
-    expect(mocks.updater.channel).toMatch(/^(arm64|x64|universal)$/)
+    if (process.platform === 'darwin') {
+      expect(mocks.updater.channel).toMatch(/^(arm64|x64|universal)$/)
+    } else {
+      expect(mocks.updater.channel).toBeNull()
+    }
     expect(mocks.updater.allowDowngrade).toBe(false)
   })
 
