@@ -144,6 +144,9 @@ app.on('before-quit', () => {
 })
 
 void app.whenReady().then(() => {
+  // Keep native window chrome, vibrancy/Mica, menus, and Chromium controls in
+  // Nerion's dark appearance regardless of the operating-system theme.
+  nativeTheme.themeSource = 'dark'
   electronApp.setAppUserModelId('com.patricio.nerion')
 
   // Nerion does not render remote content or need web camera/location/etc.
