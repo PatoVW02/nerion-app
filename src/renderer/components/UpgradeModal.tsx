@@ -5,10 +5,10 @@ const MONTHLY_CHECKOUT_URL = import.meta.env.VITE_MONTHLY_CHECKOUT_URL as string
 const LIFETIME_CHECKOUT_URL = import.meta.env.VITE_LIFETIME_CHECKOUT_URL as string
 
 const FEATURES = [
-  { icon: '✦', label: 'Smart Clean', desc: 'AI-curated list of safe-to-delete caches, logs & leftovers' },
+  { icon: '✦', label: 'Smart Clean', desc: 'Guided review of caches, logs, app leftovers, and security signals' },
   { icon: '🗑', label: 'Unlimited deletes from app', desc: 'No monthly cap when cleaning directly inside Nerion' },
   { icon: '⚡', label: 'Background scans', desc: 'Scheduled recurring scans with tray notifications' },
-  { icon: '🤖', label: 'AI analysis', desc: 'Per-item explanations and delete recommendations via OpenAI or local Ollama' },
+  { icon: '🤖', label: 'Private AI analysis', desc: 'Per-item explanations and delete recommendations via local Ollama' },
   { icon: '⚙', label: 'Custom Quick Scan folders', desc: 'Add any folder to your Quick Scan preset' },
 ]
 
@@ -52,7 +52,7 @@ export function UpgradeModal({ onClose, onActivate }: UpgradeModalProps) {
       >
       <div
         className={[
-          'w-full bg-zinc-900/80 backdrop-blur-2xl border border-white/[0.12] rounded-2xl shadow-2xl overflow-y-auto',
+          'glass-popover w-full border rounded-2xl overflow-y-auto',
           'max-h-[min(640px,calc(100vh-3rem))]',
           'transition-all duration-200 ease-out',
           entered ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[0.98]'

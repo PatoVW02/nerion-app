@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { DiskEntry } from '../types'
+import { DiskEntry, type DeleteBatchResult } from '../types'
 import { formatSize } from '../utils/format'
 import { isCriticalPath, isContentOnlyProtectedRoot } from '../utils/criticalPaths'
 import { buildCleanableTree, TreeNode } from '../utils/buildTree'
+import { collapseOverlappingEntries } from '../utils/deletion-selection'
 import { HeaderFrame } from './HeaderFrame'
 
 // ─── Animated checkmark ───────────────────────────────────────────────────────
@@ -44,9 +45,23 @@ function AnimatedCheckmark() {
 
 // ─── Done view ────────────────────────────────────────────────────────────────
 
-function DoneView({ freedKB, onDone, deleteImmediately }: { freedKB: number; onDone: () => void; deleteImmediately: boolean }) {
+function DoneView({ result, onDone }: { result: DeleteBatchResult; onDone: () => void }) {
   const [visible, setVisible] = useState(false)
   useEffect(() => { const t = setTimeout(() => setVisible(true), 120); return () => clearTimeout(t) }, [])
+  const reclaimedKB = Math.ceil(result.reclaimedBytes / 1024)
+  const movedKB = Math.ceil(result.movedToTrashBytes / 1024)
+  const headline = reclaimedKB > 0 && movedKB > 0
+    ? `${formatSize(reclaimedKB)} reclaimed · ${formatSize(movedKB)} moved`
+    : reclaimedKB > 0
+      ? `${formatSize(reclaimedKB)} reclaimed`
+      : movedKB > 0
+        ? `${formatSize(movedKB)} moved to Trash`
+        : 'Items already removed'
+  const detail = reclaimedKB > 0 && movedKB === 0
+    ? 'Disk space was reclaimed immediately'
+    : movedKB > 0
+      ? 'Trash must be emptied before that space is reclaimed'
+      : 'The selected paths no longer exist'
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-6 px-8">
@@ -56,10 +71,10 @@ function DoneView({ freedKB, onDone, deleteImmediately }: { freedKB: number; onD
         visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3'
       ].join(' ')}>
         <p className="text-2xl font-semibold text-zinc-100 tabular-nums">
-          {formatSize(freedKB)} freed
+          {headline}
         </p>
         <p className="text-sm text-zinc-500 mt-1.5">
-          {deleteImmediately ? 'Items have been deleted permanently' : 'Items have been moved to the Trash'}
+          {detail}
         </p>
       </div>
       <button
@@ -195,6 +210,9 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
         {/* Expand/collapse chevron — invisible spacer for leaves */}
         <button
           onClick={() => hasChildren && setExpanded(v => !v)}
+          aria-label={hasChildren ? `${expanded ? 'Collapse' : 'Expand'} ${node.label}` : undefined}
+          aria-expanded={hasChildren ? expanded : undefined}
+          tabIndex={hasChildren ? 0 : -1}
           className={[
             'w-4 h-4 flex items-center justify-center shrink-0 rounded text-zinc-500 hover:text-zinc-300 transition-colors',
             !hasChildren && 'invisible',
@@ -214,6 +232,9 @@ const ReviewTreeItem = memo(function ReviewTreeItem({
           <button
             onClick={batchToggle}
             disabled={deleting}
+            role="checkbox"
+            aria-checked={someTargetsSelected && !allTargetsSelected ? 'mixed' : allTargetsSelected}
+            aria-label={`${allTargetsSelected ? 'Deselect' : 'Select'} ${node.label}`}
             className={[
               'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
               'disabled:cursor-not-allowed',
@@ -322,7 +343,7 @@ interface ReviewPanelProps {
   remainingQuota: number
   /** Paths confirmed actually deleted so far — used to update the tree live during deletion. */
   confirmedDeletedPaths: Set<string>
-  onConfirm: (paths: string[], totalKB: number) => Promise<string | null>
+  onConfirm: (paths: string[], totalKB: number) => Promise<DeleteBatchResult>
   onCancel: () => void
   onDone: () => void
   onUpgradeClick: () => void
@@ -338,14 +359,22 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
   )
   const [phase, setPhase] = useState<'review' | 'deleting' | 'done'>('review')
   const [removingPaths, setRemovingPaths] = useState<Set<string>>(new Set())
-  const [freedKB, setFreedKB] = useState(0)
+  const [deleteResult, setDeleteResult] = useState<DeleteBatchResult | null>(null)
   const [mounted, setMounted] = useState(false)
   const [homeDir, setHomeDir] = useState('')
   const [expandKey, setExpandKey] = useState({ seq: 0, expanded: true })
   const [error, setError] = useState<string | null>(null)
+  const [activeDeleteCount, setActiveDeleteCount] = useState(0)
 
   useEffect(() => { requestAnimationFrame(() => setMounted(true)) }, [])
   useEffect(() => { window.electronAPI.getHomeDir().then(setHomeDir) }, [])
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && phase === 'review') onCancel()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onCancel, phase])
 
   // All entries are selectable in ReviewPanel — pass them all as selectablePaths so
   // buildCleanableTree marks each one as isCleanable regardless of file-type heuristics.
@@ -382,13 +411,12 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
   const selectedEntries = entries.filter(e => selected.has(e.path))
   // Deduplicate sizes: if both a parent folder and a child are selected,
   // the parent's sizeKB already includes the child — only count the parent.
-  const selectedEntriesDeduped = selectedEntries.filter(
-    e => !selectedEntries.some(other => other.path !== e.path && e.path.startsWith(other.path + '/'))
-  )
+  const selectedEntriesDeduped = collapseOverlappingEntries(selectedEntries)
   const totalSelectedKB = selectedEntriesDeduped.reduce((s, e) => s + e.sizeKB, 0)
-  const exceedsRemainingQuota = !isPremium && selectedEntries.length > remainingQuota
+  const selectedTopLevelCount = selectedEntriesDeduped.length
+  const exceedsRemainingQuota = !isPremium && selectedTopLevelCount > remainingQuota
   const freeTierOverLimitMessage = exceedsRemainingQuota
-    ? `You have ${remainingQuota} ${remainingQuota === 1 ? 'delete' : 'deletes'} remaining this month. Deselect ${selectedEntries.length - remainingQuota} item${selectedEntries.length - remainingQuota === 1 ? '' : 's'} to continue, or upgrade for unlimited deletes.`
+    ? `You have ${remainingQuota} ${remainingQuota === 1 ? 'delete' : 'deletes'} remaining this month. Deselect ${selectedTopLevelCount - remainingQuota} top-level item${selectedTopLevelCount - remainingQuota === 1 ? '' : 's'} to continue, or upgrade for unlimited deletes.`
     : null
 
   const handleConfirm = useCallback(async () => {
@@ -402,7 +430,8 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
     
     const toDelete = [...selectedEntries]
     setError(null)
-    setFreedKB(selectedEntriesDeduped.reduce((s, e) => s + e.sizeKB, 0))
+    setDeleteResult(null)
+    setActiveDeleteCount(selectedTopLevelCount)
     setPhase('deleting')
 
     // Stagger items out: cap total animation at 700 ms
@@ -416,27 +445,46 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
     })
 
     // Run deletion in parallel with animation
-    const confirmError = await onConfirm(
-      toDelete.map(e => e.path),
-      toDelete.reduce((s, e) => s + e.sizeKB, 0),
-    )
-
-    if (confirmError) {
+    let result: DeleteBatchResult
+    try {
+      result = await onConfirm(
+        toDelete.map(e => e.path),
+        totalSelectedKB,
+      )
+    } catch (cause) {
       animationTimers.forEach((timer) => window.clearTimeout(timer))
       setRemovingPaths(new Set())
+      setActiveDeleteCount(0)
       setPhase('review')
-      setError(confirmError)
+      setError(cause instanceof Error ? cause.message : 'The deletion request could not be completed.')
+      return
+    }
+    setDeleteResult(result)
+
+    if (result.error) {
+      animationTimers.forEach((timer) => window.clearTimeout(timer))
+      setRemovingPaths(new Set())
+      const failedPaths = new Set(result.items
+        .filter((item) => item.status === 'failed' || item.status === 'protected')
+        .map((item) => item.requestedPath))
+      setSelected(failedPaths)
+      setActiveDeleteCount(0)
+      setPhase('review')
+      setError(result.error)
       return
     }
 
     // Show done state after last animation finishes
     setTimeout(() => setPhase('done'), toDelete.length * stagger + 380)
-  }, [phase, selectedEntries, selectedEntriesDeduped, freeTierOverLimitMessage, onConfirm, onUpgradeClick])
+  }, [phase, selectedEntries, selectedTopLevelCount, totalSelectedKB, freeTierOverLimitMessage, onConfirm, onUpgradeClick])
 
   return createPortal(
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="review-deletion-title"
       className={[
-        'fixed inset-0 z-50 flex flex-col bg-zinc-950',
+        'glass-overlay fixed inset-0 z-50 flex flex-col',
         'transition-opacity duration-200 ease-out',
         mounted ? 'opacity-100' : 'opacity-0',
       ].join(' ')}
@@ -448,7 +496,7 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
           <HeaderFrame>
             <span className="opacity-0 select-none">Review</span>
           </HeaderFrame>
-          <DoneView freedKB={freedKB} onDone={onDone} deleteImmediately={deleteImmediately} />
+          {deleteResult && <DoneView result={deleteResult} onDone={onDone} />}
         </>
       ) : (
         <>
@@ -456,6 +504,8 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
             <button
               onClick={onCancel}
               disabled={phase === 'deleting'}
+              aria-label="Back from deletion review"
+              autoFocus
               style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
               className="w-7 h-7 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-500 hover:text-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
@@ -463,7 +513,7 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
             </button>
-            <h2 className="text-zinc-500 text-xs font-medium tracking-widest uppercase select-none">
+            <h2 id="review-deletion-title" className="text-zinc-500 text-xs font-medium tracking-widest uppercase select-none">
               Review Deletion
             </h2>
             <span className="ml-auto text-xs text-zinc-600 w-16 text-right tabular-nums">
@@ -500,6 +550,9 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
                 <button
                   onClick={toggleAll}
                   disabled={phase === 'deleting'}
+                  role="checkbox"
+                  aria-checked={someChecked && !allChecked ? 'mixed' : allChecked}
+                  aria-label={allChecked ? 'Deselect all deletion items' : 'Select all deletion items'}
                   className={[
                     'w-4 h-4 rounded border shrink-0 flex items-center justify-center transition-colors',
                     'disabled:cursor-not-allowed',
@@ -589,16 +642,15 @@ export function ReviewPanel({ entries, isPremium, deleteImmediately, remainingQu
                 className="w-full py-2 rounded-lg bg-red-600/80 hover:bg-red-600 disabled:opacity-30 disabled:cursor-not-allowed text-xs text-white font-medium transition-colors flex items-center justify-center gap-2"
               >
                 {phase === 'deleting' ? (() => {
-                  const remaining = selectedEntries.length - confirmedDeletedPaths.size
                   return (
                     <>
                       <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                       </svg>
-                      {remaining > 0
-                        ? `${deleteImmediately ? 'Deleting…' : 'Moving to Trash…'} ${confirmedDeletedPaths.size} of ${selectedEntries.length}`
-                        : 'Finishing up…'}
+                      {deleteImmediately
+                        ? `Deleting ${activeDeleteCount} top-level ${activeDeleteCount === 1 ? 'item' : 'items'}…`
+                        : `Moving ${activeDeleteCount} top-level ${activeDeleteCount === 1 ? 'item' : 'items'} to Trash…`}
                     </>
                   )
                 })() : (

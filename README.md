@@ -52,14 +52,24 @@ Current variables referenced by the app:
 - `VITE_MONTHLY_VARIANT_ID`
 - `VITE_LIFETIME_VARIANT_ID`
 - `GH_TOKEN`
-- `VITE_OPENAI_API_KEY`
-- `VITE_OPENAI_PROMPT_ID`
-- `VITE_OPENAI_PROMPT_VERSION`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
+- `CSC_NAME`
+- `NERION_OPENAI_API_KEY` (optional, runtime-only internal builds)
+- `NERION_OPENAI_PROMPT_ID` (optional, runtime-only internal builds)
+- `NERION_OPENAI_PROMPT_VERSION` (optional, runtime-only internal builds)
 
 Notes:
 
-- `GH_TOKEN` is used by the GitHub publishing flow.
-- `VITE_OPENAI_*` enables cloud AI mode.
+- `GH_TOKEN` is used by the GitHub publishing flow. Apple credentials and
+  `CSC_NAME` are required only for a signed, notarized public release.
+- Windows publishing fails closed unless GitHub Actions has
+  `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD`. CI verifies Authenticode
+  signatures on the installer, app executable, and native scanner before upload.
+- Public builds default to local Ollama. `NERION_OPENAI_*` can enable cloud AI
+  only when injected into the running main process; never use `VITE_OPENAI_*`
+  for credentials because Vite embeds those values in the packaged app.
 - Checkout and variant values are used for paid plans and license flows.
 
 ## Development
@@ -103,13 +113,13 @@ Architecture-specific scanner commands:
 
 ### Quick release
 
-For a single universal macOS release plus a Windows CI release:
+For the fully gated macOS release plus a Windows CI release:
 
 ```bash
 npm run release
 ```
 
-This builds the universal macOS scanner, packages the app, publishes the macOS release through `electron-builder`, then pushes the version tag so GitHub Actions can build and publish the Windows NSIS installer.
+This runs the same complete release pipeline as `release:all`.
 
 ### Full release
 
@@ -119,14 +129,16 @@ For arm64, x64, and universal artifacts with architecture-specific updater files
 npm run release:all
 ```
 
-This script:
+This script refuses to release a dirty or version-mismatched checkout. It:
 
-1. reads the version from `package.json`
-2. builds the app once
-3. builds and publishes `arm64`
-4. downloads the generated `latest-mac.yml` and re-uploads it as `arm64-mac.yml`
-5. repeats the flow for `x64`
-6. publishes the universal build last
+1. validates the package, lockfile, What's New entry, billing checkout URLs,
+   pushed default-branch commit, GitHub Actions billing/signing configuration,
+   Developer ID identity, and Apple notarization credentials
+2. runs typecheck, unit/integration tests, and native scanner tests
+3. builds, notarizes, staples, and verifies arm64, x64, and universal apps
+4. creates and pushes the source tag only after every local artifact passes
+5. uploads the verified macOS assets to an explicit draft, then publishes it
+6. lets Windows CI build from that exact tag and attach its NSIS installer
 7. keeps `latest-mac.yml` as universal for backward compatibility
 
 Generated release assets should include:
@@ -140,10 +152,11 @@ Generated release assets should include:
 
 1. Update `version` in `package.json`.
 2. Update `src/renderer/whats-new.json`.
-3. Make sure `.env.local` contains a valid `GH_TOKEN`.
+3. Export the release variables listed above (a gitignored `.env.local` is
+   supported for local use) and confirm the Lemon Squeezy Share URLs are live.
 4. Make sure `gh` is installed and authenticated.
 5. Run `npm run typecheck`.
-6. Run `npm run release` for macOS universal + Windows CI, or `npm run release:all` for the multi-architecture macOS flow.
+6. Run `npm run release` or `npm run release:all`; both execute the same gated multi-architecture flow.
 7. Verify the GitHub Release includes the DMG/ZIP files, the Windows NSIS installer, and the three architecture-specific `*-mac.yml` assets when using `release:all`.
 8. Install or update from the published builds and verify auto-update behavior.
 

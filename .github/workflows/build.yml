@@ -18,6 +18,8 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
+      - run: cargo clippy --manifest-path native/scanner-rs/Cargo.toml --all-targets -- -D warnings
       - run: npm run build:scanner:universal
       - run: npm run build
 
@@ -33,5 +35,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
+      - run: cargo clippy --manifest-path native/scanner-rs/Cargo.toml --all-targets -- -D warnings
       - run: npm run build:scanner:win:x64
       - run: npm run build

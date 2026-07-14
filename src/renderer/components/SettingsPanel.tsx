@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { NerionSettings, OllamaModel, LicenseInfo, PlatformInfo, UpdaterStatusEvent } from '../types'
+import { AiCapabilities, NerionSettings, OllamaModel, LicenseInfo, PlatformInfo, UpdaterStatusEvent } from '../types'
 import { formatSize } from '../utils/format'
-import { normalizeUiPath } from '../utils/path'
+import { pathsEqual } from '../utils/path'
 import { HeaderFrame } from './HeaderFrame'
 import { Sparkles } from 'lucide-react'
+
+const BILLING_PORTAL_URL = 'https://store.nerionapp.com/billing'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -174,7 +176,8 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
 
   // AI state
   const [aiEnabled, setAiEnabled] = useState(() => localStorage.getItem('nerion:aiHidden') !== 'true')
-  const [aiMode, setAiMode] = useState<'cloud' | 'ollama'>('cloud')
+  const [aiMode, setAiMode] = useState<'cloud' | 'ollama'>('ollama')
+  const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false })
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('idle')
   const [installedModels, setInstalledModels] = useState<OllamaModel[]>([])
   const [pullingModel, setPullingModel] = useState<string | null>(null)
@@ -194,6 +197,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
   useEffect(() => {
     window.electronAPI.getSettings().then(setSettings).catch(() => {})
     window.electronAPI.getLoginItem().then(setLoginItem).catch(() => {})
+    window.electronAPI.getAiCapabilities().then(setAiCapabilities).catch(() => {})
     window.electronAPI.getAiMode().then(setAiMode).catch(() => {})
     window.electronAPI.isUpdateReadyToInstall().then(setUpdateReadyToInstall).catch(() => {})
     if (window.electronAPI.getAppVersion) {
@@ -360,7 +364,12 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
 
   async function toggleBgEnabled() {
     if (!settings) return
-    const next = { ...settings, backgroundScan: { ...settings.backgroundScan, enabled: !settings.backgroundScan.enabled } }
+    const enabling = !settings.backgroundScan.enabled
+    const next = {
+      ...settings,
+      showMenuBarIcon: enabling ? true : settings.showMenuBarIcon,
+      backgroundScan: { ...settings.backgroundScan, enabled: enabling },
+    }
     setSettings(next); setSaving(true)
     await window.electronAPI.saveSettings(next)
     setSaving(false)
@@ -434,10 +443,13 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
 
   async function scanNow() {
     setScanningNow(true)
-    await window.electronAPI.runBgScanNow()
-    const updated = await window.electronAPI.getSettings()
-    setSettings(updated)
-    setScanningNow(false)
+    try {
+      await window.electronAPI.runBgScanNow()
+      const updated = await window.electronAPI.getSettings()
+      setSettings(updated)
+    } finally {
+      setScanningNow(false)
+    }
   }
 
   async function toggleDevDeps() {
@@ -469,11 +481,16 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     if (!settings) return
     const result = await window.electronAPI.openDirectory()
     if (!result) return
-    const normalizedResult = normalizeUiPath(result)
-    const alreadyKnown = (settings.customQuickScanFolders ?? []).includes(normalizedResult)
-    const alreadyEnabled = quickScanFolders.includes(normalizedResult)
-    const nextCustom = alreadyKnown ? (settings.customQuickScanFolders ?? []) : [...(settings.customQuickScanFolders ?? []), normalizedResult]
-    const nextEnabled = alreadyEnabled ? quickScanFolders : [...quickScanFolders, normalizedResult]
+    // Picker results are native filesystem paths. Keep them untouched for I/O,
+    // replacing any comparison-equivalent value saved by an older release.
+    const nextCustom = [
+      ...(settings.customQuickScanFolders ?? []).filter((itemPath) => !pathsEqual(itemPath, result)),
+      result,
+    ]
+    const equivalentEnabled = quickScanFolders.some((itemPath) => pathsEqual(itemPath, result))
+    const nextEnabled = equivalentEnabled
+      ? quickScanFolders.map((itemPath) => pathsEqual(itemPath, result) ? result : itemPath)
+      : [...quickScanFolders, result]
     onQuickScanFoldersChange(nextEnabled)
     await window.electronAPI.saveSettings({ ...settings, quickScanFolders: nextEnabled, customQuickScanFolders: nextCustom })
     setSettings(s => s ? { ...s, customQuickScanFolders: nextCustom } : s)
@@ -514,11 +531,11 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     }
   }
 
-  function handleAiModeChange(mode: 'cloud' | 'ollama') {
-    setAiMode(mode)
-    window.electronAPI.setAiMode(mode)
+  async function handleAiModeChange(mode: 'cloud' | 'ollama') {
+    const effectiveMode = await window.electronAPI.setAiMode(mode)
+    setAiMode(effectiveMode)
     // When switching to Ollama, kick off a status check if AI is enabled
-    if (mode === 'ollama' && aiEnabled) checkOllama()
+    if (effectiveMode === 'ollama' && aiEnabled) checkOllama()
     else setOllamaStatus('idle')
   }
 
@@ -553,7 +570,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-zinc-950"
+      className="glass-overlay fixed inset-0 z-50 flex flex-col"
       style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
     >
       {/* Header */}
@@ -648,10 +665,23 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                 Renew to restore access.
               </p>
               <button
-                onClick={onUpgrade}
+                onClick={() => window.electronAPI.openExternal(BILLING_PORTAL_URL)}
                 className="shrink-0 text-[11px] font-medium text-amber-400 hover:text-amber-300 border border-amber-500/30 hover:border-amber-500/50 rounded-md px-2.5 py-1 transition-colors"
               >
-                Renew →
+                Billing portal →
+              </button>
+            </div>
+          )}
+          {license?.needsMonthlyCancellation && (
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <p className="text-[11px] text-amber-400/90 leading-snug">
+                Lifetime is active. Cancel the previous monthly subscription to stop future renewals.
+              </p>
+              <button
+                onClick={() => window.electronAPI.openExternal(BILLING_PORTAL_URL)}
+                className="shrink-0 text-[11px] font-medium text-amber-300 hover:text-amber-200 border border-amber-500/30 rounded-md px-2.5 py-1 transition-colors"
+              >
+                Cancel monthly →
               </button>
             </div>
           )}
@@ -672,7 +702,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
               <div className="min-w-0">
                 <p className="text-sm text-zinc-200 font-medium">Auto-scan &amp; notify</p>
                 <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
-                  Scan your Mac periodically and send a notification when there's space to reclaim.
+                  Scan your computer periodically and send a notification when there's space to reclaim.
                 </p>
               </div>
               <Toggle on={!!bg?.enabled} onClick={toggleBgEnabled} disabled={saving} />
@@ -712,8 +742,10 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   {bg?.lastScanTime ? `Last scan: ${timeAgo(bg.lastScanTime)}` : 'No scan run yet'}
                 </p>
                 {bg?.lastScanTime && (
-                  <p className="text-xs text-zinc-600 mt-0.5">
-                    {totalKB > 0 ? `Found ${formatSize(totalKB)} cleanable` : 'Nothing found'}
+                  <p className={['text-xs mt-0.5', bg.lastScanComplete === false ? 'text-amber-400/80' : 'text-zinc-600'].join(' ')}>
+                    {bg.lastScanComplete === false
+                      ? `Incomplete${bg.lastScanIssueCount > 0 ? ` · ${bg.lastScanIssueCount} scan ${bg.lastScanIssueCount === 1 ? 'issue' : 'issues'}` : bg.lastScanError ? ` · ${bg.lastScanError}` : ''}${totalKB > 0 ? ` · Found ${formatSize(totalKB)} in partial results` : ''}`
+                      : totalKB > 0 ? `Found ${formatSize(totalKB)} cleanable` : 'Nothing found'}
                   </p>
                 )}
               </div>
@@ -758,29 +790,28 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
               <div className="px-4 py-4 flex flex-col gap-2">
                 <p className="text-[10px] font-semibold text-zinc-600 uppercase tracking-widest mb-1">AI Provider</p>
                 <div className="flex gap-2">
-                  {/* Cloud option */}
-                  <button
-                    onClick={() => handleAiModeChange('cloud')}
-                    className={[
-                      'flex-1 flex flex-col items-start gap-1 px-3 py-3 rounded-xl border transition-all text-left',
-                      aiMode === 'cloud'
-                        ? 'border-blue-500/40 bg-blue-600/10'
-                        : 'border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04]'
-                    ].join(' ')}
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <div className={['w-1.5 h-1.5 rounded-full shrink-0', aiMode === 'cloud' ? 'bg-blue-400' : 'bg-zinc-600'].join(' ')} />
-                      <span className={['text-xs font-semibold', aiMode === 'cloud' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
-                        Cloud AI
-                      </span>
-                      <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-semibold bg-blue-500/20 text-blue-400 uppercase tracking-wide">
-                        Recommended
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-zinc-600 leading-snug">
-                      Powered by OpenAI · no local setup required
-                    </p>
-                  </button>
+                  {/* Cloud is only exposed for internal builds configured at runtime. */}
+                  {aiCapabilities.cloudAvailable && (
+                    <button
+                      onClick={() => handleAiModeChange('cloud')}
+                      className={[
+                        'flex-1 flex flex-col items-start gap-1 px-3 py-3 rounded-xl border transition-all text-left',
+                        aiMode === 'cloud'
+                          ? 'border-blue-500/40 bg-blue-600/10'
+                          : 'border-white/[0.07] bg-white/[0.02] hover:bg-white/[0.04]'
+                      ].join(' ')}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <div className={['w-1.5 h-1.5 rounded-full shrink-0', aiMode === 'cloud' ? 'bg-blue-400' : 'bg-zinc-600'].join(' ')} />
+                        <span className={['text-xs font-semibold', aiMode === 'cloud' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
+                          Cloud AI
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-zinc-600 leading-snug">
+                        Runtime-configured OpenAI service
+                      </p>
+                    </button>
+                  )}
 
                   {/* Local Ollama option */}
                   <button
@@ -797,9 +828,14 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                       <span className={['text-xs font-semibold', aiMode === 'ollama' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
                         Local AI
                       </span>
+                      {!aiCapabilities.cloudAvailable && (
+                        <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-semibold bg-blue-500/20 text-blue-400 uppercase tracking-wide">
+                          Private
+                        </span>
+                      )}
                     </div>
                     <p className="text-[11px] text-zinc-600 leading-snug">
-                      Via Ollama · stays on your Mac
+                      Via Ollama · stays on your device
                     </p>
                   </button>
                 </div>
@@ -1234,7 +1270,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
             <div className="px-4 py-4">
               <button
                 onClick={handleCheckForUpdates}
-                disabled={checkingForUpdates || !settings}
+                disabled={checkingForUpdates || updateDownloadProgress !== null || updateReadyToInstall || !settings}
                 className="text-xs text-blue-400 hover:text-blue-300 disabled:text-zinc-600 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
               >
                 {checkingForUpdates ? (
@@ -1329,9 +1365,10 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                 <p className="text-sm text-zinc-200 font-medium">{platformInfo?.id === 'windows' ? 'Show in system tray' : 'Show in menu bar'}</p>
                 <p className="text-xs text-zinc-500 mt-1 leading-relaxed">
                   {platformInfo?.trayDescription ?? 'Display the Nerion icon for quick access and scan status.'}
+                  {bg?.enabled ? ' Required while background scans are on.' : ''}
                 </p>
               </div>
-              <Toggle on={!!settings?.showMenuBarIcon} onClick={toggleMenuBarIcon} />
+              <Toggle on={!!settings?.showMenuBarIcon} onClick={toggleMenuBarIcon} disabled={!!bg?.enabled} />
             </div>
           </div>
         </section>

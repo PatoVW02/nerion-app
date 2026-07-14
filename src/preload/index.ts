@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { DiskEntry } from '../main/scanner'
 import type { UpdaterStatusEvent } from '../main/updater'
 import type { PlatformInfo } from '../renderer/types'
+import type { AiCapabilities, DeleteBatchResult, DeleteItemStatus, LeftoverScanResult, LicenseSnapshot, PlatformAppearance, ScanEventV1 } from '../shared/contracts'
 
 // Single persistent listeners — callbacks are swapped, never re-registered.
 const ollamaCallbacks: {
@@ -12,6 +12,8 @@ const ollamaCallbacks: {
 
 const updaterStatusCallbacks = new Set<(event: UpdaterStatusEvent) => void>()
 const openSettingsTabCallbacks = new Set<(tab: 'general' | 'background' | 'ai' | 'scanning') => void>()
+const licenseCallbacks = new Set<(snapshot: LicenseSnapshot) => void>()
+const appearanceCallbacks = new Set<(appearance: PlatformAppearance) => void>()
 
 ipcRenderer.on('ollama-model', (_e, model)  => ollamaCallbacks.model?.(model))
 ipcRenderer.on('ollama-token', (_e, token)  => ollamaCallbacks.token?.(token))
@@ -24,36 +26,44 @@ ipcRenderer.on('open-settings-tab', (_e, tab) => {
   const payload = tab as 'general' | 'background' | 'ai' | 'scanning'
   openSettingsTabCallbacks.forEach((cb) => cb(payload))
 })
+ipcRenderer.on('license:changed', (_event, snapshot: LicenseSnapshot) => {
+  licenseCallbacks.forEach((callback) => callback(snapshot))
+})
+ipcRenderer.on('appearance:changed', (_event, appearance: PlatformAppearance) => {
+  appearanceCallbacks.forEach((callback) => callback(appearance))
+})
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // ── Scanner ──────────────────────────────────────────────────────────────
-  startScan: (path: string | string[]) => ipcRenderer.send('scan-start', path),
-  cancelScan: () => ipcRenderer.send('scan-cancel'),
-  onScanEntry: (cb: (entry: DiskEntry) => void) => {
-    ipcRenderer.on('scan-entry', (_e, entry) => cb(entry))
+  startScan: (pathOrPaths: string | string[]) => {
+    const scanId = globalThis.crypto.randomUUID()
+    ipcRenderer.send('scan-start', { scanId, paths: Array.isArray(pathOrPaths) ? pathOrPaths : [pathOrPaths] })
+    return scanId
   },
-  onScanDone: (cb: (error: string | null) => void) => {
-    ipcRenderer.on('scan-done', (_e, error) => cb(error))
+  cancelScan: () => ipcRenderer.send('scan-cancel'),
+  onScanEvent: (cb: (event: ScanEventV1) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, event: ScanEventV1) => cb(event)
+    ipcRenderer.on('scan-event', handler)
+    return () => ipcRenderer.off('scan-event', handler)
   },
   removeScanListeners: () => {
-    ipcRenderer.removeAllListeners('scan-entry')
-    ipcRenderer.removeAllListeners('scan-done')
+    ipcRenderer.removeAllListeners('scan-event')
   },
 
   // ── File operations ───────────────────────────────────────────────────────
   openDirectory: () => ipcRenderer.invoke('open-directory'),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   revealInFileManager: (path: string) => ipcRenderer.invoke('reveal-in-file-manager', path),
-  trashEntries: (paths: string[]) => ipcRenderer.invoke('trash-entries', paths),
-  onTrashProgress: (cb: (data: { path: string; success: boolean; error?: string }) => void) => {
-    const handler = (_: Electron.IpcRendererEvent, data: { path: string; success: boolean; error?: string }) => cb(data)
+  trashEntries: (paths: string[]) => ipcRenderer.invoke('trash-entries', paths) as Promise<DeleteBatchResult>,
+  onTrashProgress: (cb: (data: { requestedPath: string; path: string; status: DeleteItemStatus; error?: string }) => void) => {
+    const handler = (_: Electron.IpcRendererEvent, data: { requestedPath: string; path: string; status: DeleteItemStatus; error?: string }) => cb(data)
     ipcRenderer.on('trash-progress', handler)
     return () => ipcRenderer.off('trash-progress', handler)
   },
   getItemStats: (path: string) => ipcRenderer.invoke('get-item-stats', path),
 
   // ── App leftover detection ────────────────────────────────────────────────
-  findAppLeftovers: () => ipcRenderer.invoke('find-app-leftovers'),
+  findAppLeftovers: () => ipcRenderer.invoke('find-app-leftovers') as Promise<LeftoverScanResult>,
 
   // ── Ollama AI ─────────────────────────────────────────────────────────────
   // Listeners are registered once; only the callback reference is swapped.
@@ -77,6 +87,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── Settings & background scan ────────────────────────────────────────────
   getSettings: () => ipcRenderer.invoke('get-settings'),
   getPlatformInfo: () => ipcRenderer.invoke('get-platform-info') as Promise<PlatformInfo>,
+  getPlatformAppearance: () => ipcRenderer.invoke('appearance:get') as Promise<PlatformAppearance>,
+  onPlatformAppearanceChanged: (cb: (appearance: PlatformAppearance) => void) => {
+    appearanceCallbacks.add(cb)
+    return () => appearanceCallbacks.delete(cb)
+  },
   getHomeDir: () => ipcRenderer.invoke('get-home-dir') as Promise<string>,
   getAppVersion: () => ipcRenderer.invoke('get-app-version') as Promise<string>,
   getAppArch: () => ipcRenderer.invoke('get-app-arch') as Promise<string>,
@@ -131,8 +146,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLicense: () => ipcRenderer.invoke('license:get') as Promise<import('../renderer/types').LicenseInfo>,
   activateLicense: (key: string) => ipcRenderer.invoke('license:activate', key),
   deactivateLicense: () => ipcRenderer.invoke('license:deactivate'),
+  onLicenseChanged: (cb: (snapshot: LicenseSnapshot) => void) => {
+    licenseCallbacks.add(cb)
+    return () => licenseCallbacks.delete(cb)
+  },
 
   // ── AI mode ───────────────────────────────────────────────────────────────
+  getAiCapabilities: () => ipcRenderer.invoke('get-ai-capabilities') as Promise<AiCapabilities>,
   getAiMode: () => ipcRenderer.invoke('get-ai-mode') as Promise<'cloud' | 'ollama'>,
-  setAiMode: (mode: 'cloud' | 'ollama') => ipcRenderer.send('set-ai-mode', mode),
+  setAiMode: (mode: 'cloud' | 'ollama') => ipcRenderer.invoke('set-ai-mode', mode) as Promise<'cloud' | 'ollama'>,
 })

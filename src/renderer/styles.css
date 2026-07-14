@@ -2,6 +2,41 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: dark;
+  --surface-base: #09090b;
+  --surface-data: rgba(9, 9, 11, 0.94);
+  --glass-shell: rgba(9, 9, 11, 0.70);
+  --glass-panel: rgba(18, 18, 22, 0.66);
+  --glass-panel-strong: rgba(24, 24, 28, 0.82);
+  --glass-popover: rgba(31, 31, 36, 0.88);
+  --glass-overlay: rgba(9, 9, 11, 0.84);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-highlight: rgba(255, 255, 255, 0.10);
+  --glass-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+  --glass-blur-shell: 24px;
+  --glass-blur-panel: 18px;
+  --glass-saturation: 135%;
+}
+
+:root[data-material='solid'],
+:root[data-reduced-transparency='true'],
+:root[data-high-contrast='true'] {
+  --glass-shell: #09090b;
+  --glass-panel: #121216;
+  --glass-panel-strong: #18181c;
+  --glass-popover: #202024;
+  --glass-overlay: #09090b;
+  --glass-blur-shell: 0px;
+  --glass-blur-panel: 0px;
+  --glass-saturation: 100%;
+}
+
+:root[data-window-active='false'] {
+  --glass-saturation: 108%;
+  --glass-highlight: rgba(255, 255, 255, 0.06);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -10,6 +45,85 @@ body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
+  background: transparent;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-shell {
+  background: var(--glass-shell);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.glass-panel {
+  background: var(--glass-panel);
+  backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation));
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.glass-panel-strong,
+.glass-bar {
+  background: var(--glass-panel-strong);
+  backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation));
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+.glass-popover {
+  background: var(--glass-popover);
+  backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur-panel)) saturate(var(--glass-saturation));
+  border-color: var(--glass-border);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+}
+
+.glass-overlay {
+  background: var(--glass-overlay);
+  backdrop-filter: blur(var(--glass-blur-shell)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur-shell)) saturate(var(--glass-saturation));
+}
+
+.solid-data-surface {
+  background: var(--surface-data);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-shell: #09090b;
+    --glass-panel: #121216;
+    --glass-panel-strong: #18181c;
+    --glass-popover: #202024;
+    --glass-overlay: #09090b;
+    --glass-blur-shell: 0px;
+    --glass-blur-panel: 0px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:root[data-reduced-motion='true'] *,
+:root[data-reduced-motion='true'] *::before,
+:root[data-reduced-motion='true'] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
 }
 
 /* Hide scrollbar while keeping scroll functionality */

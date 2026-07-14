@@ -44,7 +44,7 @@ export function ContextMenu({
     <div
       ref={menuRef}
       style={{ position: 'fixed', left: adjustedX, top: adjustedY, zIndex: 1000 }}
-      className="w-48 bg-zinc-800/95 backdrop-blur border border-white/10 rounded-lg shadow-2xl py-1 overflow-hidden"
+      className="glass-popover w-48 border rounded-lg py-1 overflow-hidden"
       onMouseDown={(e) => e.stopPropagation()}
     >
       <button

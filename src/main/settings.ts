@@ -1,8 +1,10 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 import { getDefaultQuickScanFolders } from '../shared/policy'
-import { getAppPlatform } from './platform'
+import { getAppPlatform, getPlatformMeta } from './platform'
+import { normalizeAiMode } from './ai-config'
+import { normalizeSettingsFolderList, normalizeStoredBackgroundResults } from './runtime-policy'
 
 export interface BackgroundScanSettings {
   enabled: boolean
@@ -11,6 +13,10 @@ export interface BackgroundScanSettings {
   lastScanPath: string | null
   lastScanTime: number | null
   lastScanResults: Array<{ path: string; name: string; sizeKB: number; isDir: boolean }>
+  /** Whether every selected root completed without scanner or permission errors. */
+  lastScanComplete: boolean | null
+  lastScanIssueCount: number
+  lastScanError: string | null
 }
 
 export interface NerionSettings {
@@ -23,7 +29,7 @@ export interface NerionSettings {
   preferredOllamaModel: string | null
   onboardingComplete: boolean
   showDevDependencies: boolean
-  /** 'cloud' = OpenAI (default); 'ollama' = local Ollama */
+  /** 'cloud' = runtime-configured OpenAI; 'ollama' = local Ollama */
   aiMode: 'cloud' | 'ollama'
   /** Platform-specific quick scan folder identifiers or absolute paths. */
   quickScanFolders: string[]
@@ -45,6 +51,13 @@ function currentMonthKey(): string {
   return `${now.getFullYear()}-${month}`
 }
 
+function isAbsoluteSettingsPath(value: string): boolean {
+  return value.startsWith('/')
+    || /^[A-Za-z]:[\\/]/.test(value)
+    || /^\\\\[^\\]+\\[^\\]+/.test(value)
+    || /^\/\/[^/]+\/[^/]+/.test(value)
+}
+
 function buildDefaults(): NerionSettings {
   const quickScanDefaults = getDefaultQuickScanFolders(getAppPlatform())
   return {
@@ -54,7 +67,10 @@ function buildDefaults(): NerionSettings {
     scanTimeHour: 2,
     lastScanPath: null,
     lastScanTime: null,
-    lastScanResults: []
+    lastScanResults: [],
+    lastScanComplete: null,
+    lastScanIssueCount: 0,
+    lastScanError: null,
   },
   showMenuBarIcon: true,
   autoUpdateEnabled: true,
@@ -64,7 +80,7 @@ function buildDefaults(): NerionSettings {
   preferredOllamaModel: null,
   onboardingComplete: false,
   showDevDependencies: false,
-  aiMode: 'cloud',
+  aiMode: 'ollama',
   quickScanFolders: quickScanDefaults,
   customQuickScanFolders: [],
   lastManualScanTime: null,
@@ -85,29 +101,113 @@ function settingsPath(): string {
 export function loadSettings(): NerionSettings {
   try {
     const raw = readFileSync(settingsPath(), 'utf-8')
-    const parsed = JSON.parse(raw) as Partial<NerionSettings>
+    const parsedValue = JSON.parse(raw) as unknown
+    if (!parsedValue || typeof parsedValue !== 'object' || Array.isArray(parsedValue)) {
+      throw new Error('Settings file is not an object.')
+    }
+    const parsed = parsedValue as Partial<NerionSettings>
+    const defaults = buildDefaults()
     const hasValidDeleteQuota =
       !!parsed.deleteQuota &&
       typeof parsed.deleteQuota.monthKey === 'string' &&
-      Number.isFinite(parsed.deleteQuota.used)
+      Number.isFinite(parsed.deleteQuota.used) &&
+      parsed.deleteQuota.used >= 0
 
     const merged: NerionSettings = {
-      ...buildDefaults(),
+      ...defaults,
       ...parsed,
-      backgroundScan: { ...buildDefaults().backgroundScan, ...parsed.backgroundScan },
-      deleteQuota: { ...buildDefaults().deleteQuota, ...parsed.deleteQuota },
+      backgroundScan: { ...defaults.backgroundScan, ...parsed.backgroundScan },
+      deleteQuota: { ...defaults.deleteQuota, ...parsed.deleteQuota },
     }
 
     let mutated = false
     const currentDefaults = getDefaultQuickScanFolders(getAppPlatform())
+    const allowedQuickFolderPresets = new Set(getPlatformMeta().quickScanOptions.map((option) => option.name))
+    const normalizedQuickScanFolders = normalizeSettingsFolderList(merged.quickScanFolders)
+    if (normalizedQuickScanFolders === null) {
+      merged.quickScanFolders = currentDefaults
+      mutated = true
+    } else {
+      const safeQuickScanFolders = normalizedQuickScanFolders.filter((folder) => (
+        allowedQuickFolderPresets.has(folder) || isAbsoluteSettingsPath(folder)
+      ))
+      if (safeQuickScanFolders.length !== merged.quickScanFolders.length) mutated = true
+      merged.quickScanFolders = safeQuickScanFolders
+    }
+    const normalizedCustomFolders = normalizeSettingsFolderList(merged.customQuickScanFolders)
+    if (normalizedCustomFolders === null) {
+      merged.customQuickScanFolders = []
+      mutated = true
+    } else {
+      const safeCustomFolders = normalizedCustomFolders.filter(isAbsoluteSettingsPath)
+      if (safeCustomFolders.length !== merged.customQuickScanFolders.length) mutated = true
+      merged.customQuickScanFolders = safeCustomFolders
+    }
+    const normalizedScanResults = normalizeStoredBackgroundResults(merged.backgroundScan.lastScanResults)
+    if (normalizedScanResults === null) {
+      merged.backgroundScan.lastScanResults = []
+      mutated = true
+    } else {
+      if (normalizedScanResults.length !== merged.backgroundScan.lastScanResults.length) mutated = true
+      merged.backgroundScan.lastScanResults = normalizedScanResults
+    }
+    if (typeof merged.backgroundScan.enabled !== 'boolean') {
+      merged.backgroundScan.enabled = defaults.backgroundScan.enabled
+      mutated = true
+    }
+    if (![24, 168, 720].includes(merged.backgroundScan.intervalHours)) {
+      merged.backgroundScan.intervalHours = defaults.backgroundScan.intervalHours
+      mutated = true
+    }
+    if (!Number.isInteger(merged.backgroundScan.scanTimeHour)
+        || merged.backgroundScan.scanTimeHour < 0
+        || merged.backgroundScan.scanTimeHour > 23) {
+      merged.backgroundScan.scanTimeHour = defaults.backgroundScan.scanTimeHour
+      mutated = true
+    }
+    if (merged.backgroundScan.lastScanComplete !== null
+        && typeof merged.backgroundScan.lastScanComplete !== 'boolean') {
+      merged.backgroundScan.lastScanComplete = null
+      mutated = true
+    }
+    if (!Number.isFinite(merged.backgroundScan.lastScanIssueCount)
+        || merged.backgroundScan.lastScanIssueCount < 0) {
+      merged.backgroundScan.lastScanIssueCount = 0
+      mutated = true
+    }
+    if (merged.backgroundScan.lastScanError !== null
+        && typeof merged.backgroundScan.lastScanError !== 'string') {
+      merged.backgroundScan.lastScanError = null
+      mutated = true
+    }
+    for (const key of ['showMenuBarIcon', 'autoUpdateEnabled', 'deleteImmediately', 'quickScanTrashConfigured', 'onboardingComplete', 'showDevDependencies'] as const) {
+      if (typeof merged[key] !== 'boolean') {
+        merged[key] = defaults[key]
+        mutated = true
+      }
+    }
+    if (merged.backgroundScan.enabled && !merged.showMenuBarIcon) {
+      merged.showMenuBarIcon = true
+      mutated = true
+    }
+    if (!hasValidDeleteQuota) {
+      merged.deleteQuota = { ...defaults.deleteQuota }
+      mutated = true
+    }
     if (!merged.quickScanTrashConfigured && getAppPlatform() === 'macos') {
       if (!merged.quickScanFolders.includes('Trash')) {
         merged.quickScanFolders = [...merged.quickScanFolders, 'Trash']
       }
       merged.quickScanTrashConfigured = true
       mutated = true
-    } else if (!merged.quickScanFolders?.length) {
+    } else if (!Array.isArray(parsed.quickScanFolders)) {
       merged.quickScanFolders = currentDefaults
+      mutated = true
+    }
+
+    const normalizedAiMode = normalizeAiMode(merged.aiMode)
+    if (merged.aiMode !== normalizedAiMode) {
+      merged.aiMode = normalizedAiMode
       mutated = true
     }
 
@@ -116,8 +216,9 @@ export function loadSettings(): NerionSettings {
     const shouldNormalize = !hasValidDeleteQuota
     if (merged.deleteQuota.monthKey !== monthKey) {
       merged.deleteQuota = { monthKey, used: 0 }
-      saveSettings(merged)
-    } else if (shouldNormalize || mutated) {
+      mutated = true
+    }
+    if (shouldNormalize || mutated) {
       // Backfill missing schema keys on disk so subsequent reads/writes are stable.
       saveSettings(merged)
     }
@@ -136,7 +237,14 @@ export function saveSettings(next: NerionSettings): void {
   const p = settingsPath()
   const dir = join(p, '..')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  writeFileSync(p, JSON.stringify(next, null, 2), 'utf-8')
+  const tempPath = `${p}.${process.pid}.tmp`
+  try {
+    writeFileSync(tempPath, JSON.stringify(next, null, 2), { encoding: 'utf-8', mode: 0o600 })
+    renameSync(tempPath, p)
+  } catch (error) {
+    try { unlinkSync(tempPath) } catch { /* best-effort cleanup */ }
+    throw error
+  }
 }
 
 export function patchSettings(patch: Partial<Omit<NerionSettings, 'backgroundScan'>> & { backgroundScan?: Partial<BackgroundScanSettings> }): NerionSettings {

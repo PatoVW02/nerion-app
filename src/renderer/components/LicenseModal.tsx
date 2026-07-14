@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { LicenseInfo } from '../types'
 
+const BILLING_PORTAL_URL = 'https://store.nerionapp.com/billing'
+
 interface LicenseModalProps {
   license: LicenseInfo | null
   onClose: () => void
@@ -17,6 +19,7 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
   const [key, setKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [deactivating, setDeactivating] = useState(false)
+  const [replacing, setReplacing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const keyInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -26,7 +29,7 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
   }, [])
 
   useEffect(() => {
-    if (license?.active) return
+    if (license?.active && !replacing) return
     const id = requestAnimationFrame(() => {
       const input = keyInputRef.current
       if (!input) return
@@ -34,7 +37,7 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
       input.select()
     })
     return () => cancelAnimationFrame(id)
-  }, [license?.active])
+  }, [license?.active, replacing])
 
   async function handleActivate() {
     const trimmed = key.trim()
@@ -44,7 +47,9 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
     const result = await onActivate(trimmed)
     setLoading(false)
     if (result.ok) {
-      onClose()
+      setKey('')
+      if (replacing || result.info.needsMonthlyCancellation) setReplacing(false)
+      else onClose()
     } else {
       // Map raw API/network errors to user-friendly messages
       const raw = result.error.toLowerCase()
@@ -84,7 +89,7 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
       <div className={[
-        'relative w-full max-w-[400px] mx-4 bg-zinc-900/80 backdrop-blur-2xl border border-white/[0.12] rounded-xl shadow-2xl overflow-hidden',
+        'glass-popover relative w-full max-w-[400px] mx-4 border rounded-xl overflow-hidden',
         'transition-all duration-200 ease-out',
         entered ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-2 scale-[0.98]'
       ].join(' ')}>
@@ -107,7 +112,7 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
           </p>
         </div>
 
-        {license?.active ? (
+        {license?.active && !replacing ? (
           /* ── Active license view ── */
           <div className="px-6 pb-6 space-y-4">
             <div className="rounded-lg bg-green-950/30 border border-green-700/30 p-4 space-y-2">
@@ -131,7 +136,40 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
                 <span className="text-[11px] text-zinc-500">Type</span>
                 <span className="text-[11px] text-zinc-400 capitalize">{license.licenseType}</span>
               </div>
+              {license.message && (
+                <p className="pt-1 text-[10px] leading-relaxed text-zinc-500">{license.message}</p>
+              )}
             </div>
+            {license.needsMonthlyCancellation && (
+              <div className="rounded-lg border border-amber-500/25 bg-amber-500/[0.08] p-3">
+                <p className="text-[11px] font-medium text-amber-300">Cancel the previous monthly plan</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-amber-300/70">
+                  Your Lifetime license is active. The old monthly subscription must still be cancelled in the billing portal.
+                </p>
+                <button
+                  onClick={() => window.electronAPI.openExternal(BILLING_PORTAL_URL)}
+                  className="mt-2 text-[11px] text-amber-200 underline underline-offset-2 hover:text-white"
+                >
+                  Open billing portal
+                </button>
+              </div>
+            )}
+            {license.canManageBilling && !license.needsMonthlyCancellation && (
+              <button
+                onClick={() => window.electronAPI.openExternal(BILLING_PORTAL_URL)}
+                className="w-full py-2 rounded-lg border border-blue-500/25 bg-blue-500/10 text-xs text-blue-300 hover:bg-blue-500/15 transition-colors"
+              >
+                Manage subscription
+              </button>
+            )}
+            {license.kind === 'monthly' && (
+              <button
+                onClick={() => { setReplacing(true); setError(null) }}
+                className="w-full py-2 rounded-lg border border-violet-500/25 bg-violet-500/10 text-xs text-violet-300 hover:bg-violet-500/15 transition-colors"
+              >
+                Activate a Lifetime license
+              </button>
+            )}
             <button
               onClick={handleDeactivate}
               disabled={deactivating}
@@ -140,12 +178,28 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
               {deactivating ? 'Deactivating…' : 'Deactivate on this Mac'}
             </button>
             <p className="text-[11px] text-zinc-700 text-center">
-              Deactivating frees up an activation slot so you can use your license on another Mac.
+              Deactivating frees up an activation slot so you can use your license on another device.
             </p>
           </div>
         ) : (
           /* ── Activation form ── */
           <div className="px-6 pb-6 space-y-3">
+            {license?.kind === 'monthly' && !license.active && (
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.08] px-3 py-2.5 text-[11px] leading-relaxed text-amber-300/80">
+                <p>{license.message ?? 'Your monthly license needs attention.'}</p>
+                <button
+                  onClick={() => window.electronAPI.openExternal(BILLING_PORTAL_URL)}
+                  className="mt-2 text-amber-200 underline underline-offset-2 hover:text-white"
+                >
+                  Renew or manage subscription
+                </button>
+              </div>
+            )}
+            {replacing && (
+              <div className="rounded-lg border border-violet-500/20 bg-violet-500/[0.08] px-3 py-2 text-[11px] leading-relaxed text-violet-300/80">
+                Your current monthly license stays active unless the new Lifetime key validates successfully.
+              </div>
+            )}
             <div>
               <input
                 ref={keyInputRef}
@@ -179,9 +233,15 @@ export function LicenseModal({ license, onClose, onUpgrade, onActivate, onDeacti
               {loading ? 'Activating…' : 'Activate License'}
             </button>
             <p className="text-center">
-              <button onClick={onUpgrade} className="text-[11px] text-zinc-600 hover:text-zinc-400 transition-colors">
-                Don't have a license? Get one →
-              </button>
+              {replacing ? (
+                <button onClick={() => { setReplacing(false); setError(null) }} className="text-[11px] text-zinc-600 hover:text-zinc-400 transition-colors">
+                  Keep current license
+                </button>
+              ) : (
+                <button onClick={onUpgrade} className="text-[11px] text-zinc-600 hover:text-zinc-400 transition-colors">
+                  Don't have a license? Get one →
+                </button>
+              )}
             </p>
           </div>
         )}

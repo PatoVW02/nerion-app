@@ -13,6 +13,8 @@ export function useLicense(): LicenseState {
 
   useEffect(() => {
     window.electronAPI.getLicense().then(setLicense)
+    const unsubscribe = window.electronAPI.onLicenseChanged(setLicense)
+    return unsubscribe
   }, [])
 
   const activate = useCallback(async (key: string) => {
@@ -22,11 +24,8 @@ export function useLicense(): LicenseState {
   }, [])
 
   const deactivate = useCallback(async () => {
-    await window.electronAPI.deactivateLicense()
-    setLicense({
-      active: false, licenseType: null, maskedKey: null,
-      customerEmail: null, expiresAt: null, lastValidated: null,
-    })
+    const snapshot = await window.electronAPI.deactivateLicense()
+    setLicense(snapshot)
   }, [])
 
   return {

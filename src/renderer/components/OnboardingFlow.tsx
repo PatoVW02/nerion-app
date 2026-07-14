@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { PlatformInfo } from '../types'
+import type { AiCapabilities, PlatformInfo } from '../types'
 
 type Step = 'notifications' | 'full-disk-access' | 'ai-choice' | 'ai-provider-choice' | 'ollama-install' | 'login'
 
@@ -18,8 +18,9 @@ export function OnboardingFlow({ onComplete }: Props) {
   const [fdaContinueReady, setFdaContinueReady] = useState(false)
   const [fdaActuallyGranted, setFdaActuallyGranted] = useState(false)
   const [checkingOllama, setCheckingOllama] = useState(false)
-  const [loginEnabled, setLoginEnabled] = useState(true)
+  const [loginEnabled, setLoginEnabled] = useState(false)
   const [deleteImmediately, setDeleteImmediately] = useState(false)
+  const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false })
 
   function navigate(next: Step) {
     setHistory(h => [...h, next])
@@ -30,13 +31,8 @@ export function OnboardingFlow({ onComplete }: Props) {
   }
 
   useEffect(() => {
-    if (step === 'login') {
-      window.electronAPI.setLoginItem(true)
-    }
-  }, [step])
-
-  useEffect(() => {
     window.electronAPI.getPlatformInfo().then(setPlatformInfo).catch(() => {})
+    window.electronAPI.getAiCapabilities().then(setAiCapabilities).catch(() => {})
     window.electronAPI.checkNotificationPermission().then((granted) => {
       setNotifGranted(granted)
       setNotifDone(granted === true)
@@ -44,6 +40,7 @@ export function OnboardingFlow({ onComplete }: Props) {
     window.electronAPI.getSettings().then((settings) => {
       setDeleteImmediately(settings.deleteImmediately ?? false)
     }).catch(() => {})
+    window.electronAPI.getLoginItem().then(setLoginEnabled).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -74,12 +71,12 @@ export function OnboardingFlow({ onComplete }: Props) {
     window.electronAPI.revealInFileManager(appPath)
   }
 
-  function finish() {
-    window.electronAPI.markOnboardingComplete()
+  async function finish() {
+    await window.electronAPI.markOnboardingComplete()
     if (fdaSettingsOpened && !fdaActuallyGranted) {
       // FDA was opened but the running process never confirmed it — relaunch so
       // the TCC grant takes effect (required for scanning/cleaning ~/Library/Logs).
-      window.electronAPI.relaunchApp()
+      await window.electronAPI.relaunchApp()
     } else {
       onComplete()
     }
@@ -103,13 +100,16 @@ export function OnboardingFlow({ onComplete }: Props) {
     navigate('login')
   }
 
-  function handleCloudModel() {
+  async function handleCloudModel() {
+    const mode = await window.electronAPI.setAiMode('cloud')
+    if (mode !== 'cloud') return
     localStorage.removeItem('nerion:aiHidden')
     navigate('login')
   }
 
   async function handleOllamaChoice() {
     setCheckingOllama(true)
+    await window.electronAPI.setAiMode('ollama')
     const status = await window.electronAPI.checkOllama()
     setCheckingOllama(false)
     localStorage.removeItem('nerion:aiHidden')
@@ -142,7 +142,7 @@ export function OnboardingFlow({ onComplete }: Props) {
 
   return (
     <div
-      className="flex flex-col h-screen bg-zinc-950 text-zinc-100 select-none"
+      className="app-shell flex flex-col h-screen text-zinc-100 select-none"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       <div style={{ height: '52px' }} />
@@ -324,15 +324,19 @@ export function OnboardingFlow({ onComplete }: Props) {
                 </svg>
               }
               title="Choose AI provider"
-              description="Use a cloud model for the best results, or run Ollama locally to keep everything on your Mac."
+              description={aiCapabilities.cloudAvailable
+                ? 'Choose the configured cloud service or run Ollama locally to keep analysis on your device.'
+                : 'Use Ollama for private file analysis that stays on your device.'}
             >
               <div className="flex flex-col gap-2">
-                <button
-                  onClick={handleCloudModel}
-                  className="w-full py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm font-medium text-white transition-colors"
-                >
-                  Cloud model
-                </button>
+                {aiCapabilities.cloudAvailable && (
+                  <button
+                    onClick={handleCloudModel}
+                    className="w-full py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm font-medium text-white transition-colors"
+                  >
+                    Cloud model
+                  </button>
+                )}
                 <button
                   onClick={handleOllamaChoice}
                   disabled={checkingOllama}
@@ -473,7 +477,7 @@ function StepCard({
   children: React.ReactNode
 }) {
   return (
-    <div className="rounded-2xl bg-white/[0.04] border border-white/[0.07] p-6 flex flex-col gap-5">
+    <div className="glass-panel-strong rounded-2xl border border-white/[0.07] p-6 flex flex-col gap-5">
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="w-10 h-10 rounded-xl bg-white/[0.06] flex items-center justify-center">
