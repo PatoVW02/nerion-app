@@ -22,6 +22,8 @@ describe('deletion path policy', () => {
     const home = 'C:\\Users\\Pat'
     expect(isCriticalPath('C:\\Windows\\System32', 'windows', home)).toBe(true)
     expect(isContentOnlyProtectedRoot('C:\\Users\\Pat\\Downloads', 'windows', home)).toBe(true)
+    expect(isContentOnlyProtectedRoot('C:\\Users\\Pat\\AppData\\Local\\Temp', 'windows', home)).toBe(true)
+    expect(isCriticalPath('C:\\Users\\Pat\\AppData\\Local\\Temp\\Nerion\\file.bin', 'windows', home)).toBe(false)
     expect(isCriticalPath('C:\\Users\\Pat\\Projects\\Nerion', 'windows', home)).toBe(false)
     expect(isCriticalPath('D:\\', 'windows', home)).toBe(true)
     expect(isCriticalPath('D:\\Windows\\System32', 'windows', home)).toBe(true)

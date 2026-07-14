@@ -1,5 +1,4 @@
-import { existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AppPlatform } from '../shared/platform'
@@ -13,12 +12,11 @@ let fixture = ''
 const runtimePlatform: AppPlatform = process.platform === 'win32' ? 'windows' : 'macos'
 
 function createFixture(): string {
-  // Windows treats `/tmp/...` as drive-relative rather than absolute. Use its
-  // native temporary directory and resolve any 8.3 alias so the symlink/junction
-  // safety check compares the same canonical spelling returned by realpath.
-  const temporaryRoot = process.platform === 'win32' ? tmpdir() : '/tmp'
-  const created = mkdtempSync(join(temporaryRoot, 'nerion-delete-'))
-  return process.platform === 'win32' ? realpathSync(created) : created
+  // Windows treats `/tmp/...` as drive-relative, while its system temp path can
+  // contain an 8.3 alias that intentionally fails the junction-boundary check.
+  // A unique directory under the checked-out workspace is a stable native path
+  // on both CI platforms and still exercises the real filesystem operations.
+  return mkdtempSync(join(process.cwd(), '.nerion-delete-'))
 }
 
 describe('structured deletion', () => {
