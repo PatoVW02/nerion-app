@@ -20,7 +20,7 @@ export function OnboardingFlow({ onComplete }: Props) {
   const [checkingOllama, setCheckingOllama] = useState(false)
   const [loginEnabled, setLoginEnabled] = useState(false)
   const [deleteImmediately, setDeleteImmediately] = useState(false)
-  const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false })
+  const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false, cloudSource: null, cloudConfigurable: false })
 
   function navigate(next: Step) {
     setHistory(h => [...h, next])

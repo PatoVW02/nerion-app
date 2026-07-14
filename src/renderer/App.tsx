@@ -20,7 +20,7 @@ import { useLicense } from './hooks/useLicense'
 import { UpgradeModal } from './components/UpgradeModal'
 import { LicenseModal } from './components/LicenseModal'
 import { WhatsNewModal } from './components/WhatsNewModal'
-import { getDefaultQuickScanFolders, getQuickScanRootPath, resolveQuickFolderPath } from '../shared/policy'
+import { getDefaultQuickScanFolders, getQuickScanRootPath, isAutomaticCleanupRoot, resolveQuickFolderPath } from '../shared/policy'
 import { isAbsoluteUiPath, isSameOrDescendantPath, normalizeUiPath, pathBasename, pathParent } from './utils/path'
 import { usePlatformAppearance } from './hooks/usePlatformAppearance'
 import { canStartFileScan } from './utils/scan-state'
@@ -312,6 +312,11 @@ function AppShell() {
     const result = new Map<string, DiskEntry>()
     // Pre-compute prefix list once so the inner loop is cheap
     const allowedPrefixes = quickScanAllowedPaths ? [...quickScanAllowedPaths] : null
+    const automaticCleanupParents = new Set(
+      (quickScanPaths ?? [])
+        .filter((scanPath) => isAutomaticCleanupRoot(scanPath, platformInfo?.id ?? 'macos', homeDir))
+        .map(normalizeUiPath),
+    )
 
     // Downloads directories that are the explicit target of this scan (rootPath itself
     // is a Downloads folder, or a quick-scan path is a Downloads folder).
@@ -346,8 +351,9 @@ function AppShell() {
           && downloadsParents.has(parentDir)
           && entry.sizeKB > 0
         const isTrashItem = trashParents.has(parentDir) && entry.sizeKB > 0
+        const isAutomaticCleanupItem = automaticCleanupParents.has(parentDir) && entry.sizeKB > 0
 
-        if (allowedPrefixes && !isDev && !isDownloadsItem && !isTrashItem) {
+        if (allowedPrefixes && !isDev && !isDownloadsItem && !isTrashItem && !isAutomaticCleanupItem) {
           // For regular cache/temp entries: restrict to the quick-scan allowed paths
           // (e.g. ~/Library/Caches, ~/Library/Logs, custom absolute paths).
           // Dev dependencies are intentionally exempt from this filter — they have their
@@ -360,12 +366,12 @@ function AppShell() {
         const isProtectedRootContentsOnly = isContentOnlyProtectedRoot(entry.path, homeDir)
         if (isProtectedRootContentsOnly) continue
 
-        if (isCleanableForHome(entry, homeDir) || isDev || isDownloadsItem || isTrashItem)
+        if (isCleanableForHome(entry, homeDir) || isDev || isDownloadsItem || isTrashItem || isAutomaticCleanupItem)
           result.set(entry.path, entry)
       }
     }
     return result
-  }, [tree, quickScanAllowedPaths, rootPath, homeDir, platformInfo])
+  }, [tree, quickScanAllowedPaths, quickScanPaths, rootPath, homeDir, platformInfo])
 
   const cleanableCount = allCleanable.size
 

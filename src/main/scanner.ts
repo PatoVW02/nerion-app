@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { promises as fsp } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
 import * as path from 'node:path'
 import { SCAN_PROTOCOL_VERSION, type ScanEntryV1, type ScanEventV1, type ScanIssue, type ScanIssueV1, type ScanSummaryV1 } from '../shared/contracts'
 import { getAppPlatform, resolveScannerBinaryPath } from './platform'
@@ -9,7 +10,7 @@ export type DiskEntry = ScanEntryV1
 export interface ScanOptions {
   scanId: string
   rootId: string
-  lowPriority?: boolean
+  profile?: 'interactive' | 'background'
 }
 
 export interface ScanCompletion {
@@ -103,11 +104,9 @@ function spawnNativeScanner(
   onDone: (completion: ScanCompletion) => void,
 ): () => void {
   const scannerPath = getAppPlatform() === 'windows' ? dirPath.replace(/\//g, '\\') : dirPath
-  const lowPriority = options.lowPriority === true && getAppPlatform() !== 'windows'
-  const command = lowPriority ? 'nice' : binary
-  const args = lowPriority
-    ? ['-n', '10', binary, scannerPath, options.scanId, options.rootId]
-    : [scannerPath, options.scanId, options.rootId]
+  const profile = options.profile ?? 'interactive'
+  const scannerArgs = [scannerPath, options.scanId, options.rootId, profile]
+  const { command, args } = nativeScannerLaunch(binary, scannerArgs, profile, globalThis.process.platform)
   const process = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
   let buffer = ''
   let stderr = ''
@@ -178,6 +177,25 @@ function spawnNativeScanner(
   }
 }
 
+function nativeScannerLaunch(
+  binary: string,
+  scannerArgs: string[],
+  profile: NonNullable<ScanOptions['profile']>,
+  nodePlatform: NodeJS.Platform,
+): { command: string; args: string[] } {
+  if (nodePlatform === 'darwin') {
+    const policy = profile === 'background'
+      ? ['-d', 'throttle', '-c', 'background', '-b']
+      : ['-d', 'throttle', '-c', 'utility']
+    return { command: '/usr/sbin/taskpolicy', args: [...policy, binary, ...scannerArgs] }
+  }
+  if (nodePlatform === 'win32') return { command: binary, args: scannerArgs }
+  return {
+    command: 'nice',
+    args: ['-n', profile === 'background' ? '15' : '5', binary, ...scannerArgs],
+  }
+}
+
 function spawnNodeFallback(
   dirPath: string,
   options: ScanOptions,
@@ -189,6 +207,10 @@ function spawnNodeFallback(
   let issueCount = 0
   const seenHardlinks = new Set<string>()
   const currentPlatform = getAppPlatform()
+  const profile = options.profile ?? 'interactive'
+  const yieldEvery = profile === 'background' ? 64 : 128
+  const yieldMs = profile === 'background' ? 2 : 1
+  let processedEntries = 0
 
   const emitIssue = (itemPath: string, code: ScanIssue['code'], message: string) => {
     issueCount += 1
@@ -244,6 +266,8 @@ function spawnNodeFallback(
     let total = allocatedBytes(directoryStats)
     for (const nativeName of entries) {
       if (cancelled) break
+      processedEntries += 1
+      if (processedEntries % yieldEvery === 0) await delay(yieldMs)
       const name = decodeExactUtf8Name(nativeName)
       if (name === null) {
         emitIssue(
@@ -305,6 +329,7 @@ function decodeExactUtf8Name(nativeName: Buffer): string | null {
 
 export const scannerTesting = {
   decodeExactUtf8Name,
+  nativeScannerLaunch,
   parseNativeEvent,
   spawnNodeFallback,
 }

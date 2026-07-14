@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkS
 import { getDefaultQuickScanFolders } from '../shared/policy'
 import { getAppPlatform, getPlatformMeta } from './platform'
 import { normalizeAiMode } from './ai-config'
+import { loadCloudAiKey } from './cloud-ai'
 import { normalizeSettingsFolderList, normalizeStoredBackgroundResults } from './runtime-policy'
 
 export interface BackgroundScanSettings {
@@ -205,7 +206,7 @@ export function loadSettings(): NerionSettings {
       mutated = true
     }
 
-    const normalizedAiMode = normalizeAiMode(merged.aiMode)
+    const normalizedAiMode = normalizeAiMode(merged.aiMode, process.env, loadCloudAiKey() !== null)
     if (merged.aiMode !== normalizedAiMode) {
       merged.aiMode = normalizedAiMode
       mutated = true

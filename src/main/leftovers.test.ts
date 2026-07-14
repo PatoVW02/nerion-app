@@ -46,6 +46,24 @@ describe('leftover identity matching', () => {
     expect(leftoverTesting.installedConflicts(leftoverTesting.artifactIdentity('com.other.widgetizer'), installed)).toHaveLength(0)
   })
 
+  it('fails closed for sibling updater and service IDs from an installed vendor', () => {
+    const installed = [{
+      sourcePath: '/Applications/Chrome.app',
+      bundleIds: new Set(['com.google.chrome']),
+      names: new Set(['chrome']),
+      tokens: new Set(['google', 'chrome']),
+    }]
+    expect(leftoverTesting.bundleVendor('com.google.googleupdater')).toBe('google')
+    expect(leftoverTesting.installedConflicts(
+      leftoverTesting.artifactIdentity('com.google.GoogleUpdater.plist'),
+      installed,
+    )).toHaveLength(1)
+    expect(leftoverTesting.installedConflicts(
+      leftoverTesting.artifactIdentity('com.unrelated.GoogleUpdater.plist'),
+      installed,
+    )).toHaveLength(0)
+  })
+
   it('suppresses an exact shared vendor folder when one of that vendor’s apps is installed', () => {
     const installed = [{
       sourcePath: '/Applications/Adobe Photoshop.app',
@@ -101,6 +119,13 @@ describe('leftover identity matching', () => {
     expect(leftoverTesting.identitiesBelongTogether(bundleArtifact, ambiguousArtifact)).toBe(false)
   })
 
+  it('groups a vendor-named support folder with its structured app remnants', () => {
+    expect(leftoverTesting.identitiesBelongTogether(
+      leftoverTesting.artifactIdentity('Google'),
+      leftoverTesting.artifactIdentity('com.google.Chrome'),
+    )).toBe(true)
+  })
+
   it('does not merge unrelated structured identities through generic leaves or vendor namespaces', () => {
     expect(leftoverTesting.identitiesBelongTogether(
       leftoverTesting.artifactIdentity('homebrew.mxcl.mongodb-community.plist'),
@@ -143,11 +168,19 @@ describe('leftover identity matching', () => {
     const identity = leftoverTesting.artifactIdentity('com.example.Uninstalled')
     expect(leftoverTesting.leftoverConfidence(identity, 2, true)).toBe('recommended')
     expect(leftoverTesting.leftoverConfidence(identity, 2, false)).toBe('review')
+    expect(leftoverTesting.leftoverConfidence(identity, 2, true, true)).toBe('review')
 
     const audit = { inaccessiblePaths: new Set<string>(), timedOut: false }
     leftoverTesting.recordInventoryReadFailure('/Applications/Restricted', { code: 'EACCES' }, audit)
     leftoverTesting.recordInventoryReadFailure('/Applications/Missing', { code: 'ENOENT' }, audit)
     expect([...audit.inaccessiblePaths]).toEqual(['/Applications/Restricted'])
+  })
+
+  it('never groups a system service with user-level artifacts to promote its confidence', () => {
+    const userArtifact = leftoverTesting.artifactIdentity('com.acme.widget')
+    const systemService = leftoverTesting.artifactIdentity('com.acme.widget')
+    expect(leftoverTesting.identitiesCanShareGroup(userArtifact, false, systemService, true)).toBe(false)
+    expect(leftoverTesting.identitiesCanShareGroup(userArtifact, false, systemService, false)).toBe(true)
   })
 
   it('stops installed-app identity work when the scan deadline has elapsed', async () => {

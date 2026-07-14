@@ -25,6 +25,7 @@ interface ArtifactIdentity {
 
 interface PendingGroup {
   identity: ArtifactIdentity
+  systemLevel: boolean
   artifacts: LeftoverArtifact[]
   evidence: Set<string>
 }
@@ -142,6 +143,14 @@ function normalizeBundleId(value: string): string | null {
   }
   if (!/^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*){1,}$/i.test(candidate)) return null
   return candidate
+}
+
+function bundleVendor(bundleId: string | null): string | null {
+  if (!bundleId) return null
+  const segments = bundleId.split('.')
+  if (segments.length < 3 || segments[0] === 'homebrew') return null
+  const vendor = canonicalName(segments[1])
+  return vendor.length >= 3 && !GENERIC_CANONICAL_NAMES.has(vendor) ? vendor : null
 }
 
 function isSystemOwned(identity: ArtifactIdentity, discoveredSystemNames: Set<string> = new Set()): boolean {
@@ -445,6 +454,7 @@ function artifactIdentity(name: string): ArtifactIdentity {
 
 function installedConflicts(identity: ArtifactIdentity, installed: InstalledIdentity[]): string[] {
   const conflicts = new Set<string>()
+  const identityVendor = bundleVendor(identity.bundleId)
   for (const app of installed) {
     const bundleConflict = identity.bundleId && [...app.bundleIds].some((bundleId) =>
       identity.bundleId === bundleId
@@ -455,7 +465,14 @@ function installedConflicts(identity: ArtifactIdentity, installed: InstalledIden
     const sharedTokens = [...identity.tokens].filter((token) => app.tokens.has(token))
     const exactVendorConflict = identity.tokens.size === 1
       && sharedTokens.length === 1
-    if (bundleConflict || nameConflict || exactVendorConflict || sharedTokens.length >= 2) conflicts.add(app.sourcePath)
+    // Updaters, launch agents, and shared support tools often use a sibling
+    // bundle ID rather than the installed app's exact ID. If any live app from
+    // that reverse-DNS vendor remains installed, fail closed and keep its data.
+    const bundleVendorConflict = identityVendor !== null
+      && [...app.bundleIds].some((bundleId) => bundleVendor(bundleId) === identityVendor)
+    if (bundleConflict || bundleVendorConflict || nameConflict || exactVendorConflict || sharedTokens.length >= 2) {
+      conflicts.add(app.sourcePath)
+    }
   }
   return [...conflicts]
 }
@@ -529,11 +546,16 @@ function identitiesBelongTogether(a: ArtifactIdentity, b: ArtifactIdentity): boo
   const namedIdentity = a.bundleId ? b : b.bundleId ? a : null
   if (bundleIdentity?.bundleId && namedIdentity) {
     const segments = bundleIdentity.bundleId.split('.')
+    const vendor = bundleVendor(bundleIdentity.bundleId)
     const leaf = canonicalName(segments.at(-1) ?? '')
     const vendorAndLeaf = canonicalName(segments.slice(-2).join(' '))
     if (
       namedIdentity.canonicalName.length >= 4
-      && (namedIdentity.canonicalName === leaf || namedIdentity.canonicalName === vendorAndLeaf)
+      && (
+        namedIdentity.canonicalName === leaf
+        || namedIdentity.canonicalName === vendorAndLeaf
+        || namedIdentity.canonicalName === vendor
+      )
     ) return true
   }
   const exactNonGenericName = a.canonicalName.length >= 4
@@ -542,6 +564,15 @@ function identitiesBelongTogether(a: ArtifactIdentity, b: ArtifactIdentity): boo
   if (exactNonGenericName) return true
   const shared = [...a.tokens].filter((token) => b.tokens.has(token))
   return shared.length >= 2
+}
+
+function identitiesCanShareGroup(
+  a: ArtifactIdentity,
+  aSystemLevel: boolean,
+  b: ArtifactIdentity,
+  bSystemLevel: boolean,
+): boolean {
+  return aSystemLevel === bSystemLevel && identitiesBelongTogether(a, b)
 }
 
 function shouldEmitGroup(identity: ArtifactIdentity, artifacts: LeftoverArtifact[]): boolean {
@@ -588,14 +619,16 @@ function leftoverConfidence(
   identity: ArtifactIdentity,
   distinctLocations: number,
   inventoryComplete: boolean,
+  systemLevelOnly = false,
 ): LeftoverGroup['confidence'] {
-  return inventoryComplete && (identity.bundleId !== null || distinctLocations >= 2)
+  return inventoryComplete && !systemLevelOnly && (identity.bundleId !== null || distinctLocations >= 2)
     ? 'recommended'
     : 'review'
 }
 
 export const leftoverTesting = {
   artifactIdentity,
+  identitiesCanShareGroup,
   identitiesBelongTogether,
   installedConflicts,
   isSystemOwned,
@@ -603,6 +636,7 @@ export const leftoverTesting = {
   leftoverConfidence,
   mapWithConcurrencyUntil,
   measureArtifact,
+  bundleVendor,
   normalizeBundleId,
   recordInventoryReadFailure,
   shouldEmitGroup,
@@ -642,6 +676,7 @@ export async function findAppLeftovers(): Promise<LeftoverScanResult> {
       if (entry.isSymbolicLink() || IGNORED_ARTIFACT_NAMES.has(normalize(entry.name))) continue
       const identity = artifactIdentity(entry.name)
       if (!identity.strong || isSystemOwned(identity, discoveredSystemNames) || isNonApplicationArtifact(entry.name, identity)) continue
+      const isSystemLocation = location.startsWith('System ')
       const isLaunchRegistration = location.includes('Launch Agent') || location.includes('Launch Daemon')
       const isOpaqueIdentifier = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(entry.name)
       // A loose file or opaque script directory is not an application identity.
@@ -651,13 +686,23 @@ export async function findAppLeftovers(): Promise<LeftoverScanResult> {
       if (entry.name.startsWith('.') && !identity.bundleId) continue
       if (entry.isFile() && !identity.bundleId && !isLaunchRegistration) continue
       if (location === 'Application Scripts' && !identity.bundleId) continue
+      if (isSystemLocation && !identity.bundleId) continue
       if (installedConflicts(identity, inventory.identities).length > 0) continue
 
       const artifact = await measureArtifact(path.join(directory, entry.name), location, inaccessible, scanDeadline)
+      if (artifact.allocatedBytes === 0) continue
       if (!artifact.sizeComplete && Date.now() >= scanDeadline) timedOut = true
-      let group = pending.find((candidate) => identitiesBelongTogether(candidate.identity, identity))
+      // A system-wide support item or launch service must never borrow the
+      // confidence of related user-level cache data. Keep it in Review even
+      // when both artifacts share an identity.
+      let group = pending.find((candidate) => identitiesCanShareGroup(
+        candidate.identity,
+        candidate.systemLevel,
+        identity,
+        isSystemLocation,
+      ))
       if (!group) {
-        group = { identity, artifacts: [], evidence: new Set() }
+        group = { identity, systemLevel: isSystemLocation, artifacts: [], evidence: new Set() }
         pending.push(group)
       }
       group.artifacts.push(artifact)
@@ -670,9 +715,10 @@ export async function findAppLeftovers(): Promise<LeftoverScanResult> {
     const artifacts = group.artifacts.sort((a, b) => b.allocatedBytes - a.allocatedBytes)
     const allocatedBytes = artifacts.reduce((total, artifact) => total + artifact.allocatedBytes, 0)
     const distinctLocations = new Set(artifacts.map((artifact) => artifact.location)).size
-    const confidence = leftoverConfidence(group.identity, distinctLocations, inventory.complete)
+    const confidence = leftoverConfidence(group.identity, distinctLocations, inventory.complete, group.systemLevel)
     const primary = artifacts[0]
-    const id = group.identity.bundleId ?? `${group.identity.canonicalName}:${primary.path}`
+    const baseId = group.identity.bundleId ?? `${group.identity.canonicalName}:${primary.path}`
+    const id = group.systemLevel ? `${baseId}:system-review` : baseId
     return {
       id,
       appName: group.identity.displayName,

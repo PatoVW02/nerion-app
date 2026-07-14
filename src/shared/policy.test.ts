@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isCleanable, isContentOnlyProtectedRoot, isCriticalPath, resolveQuickFolderPath } from './policy'
+import { isAutomaticCleanupRoot, isCleanable, isContentOnlyProtectedRoot, isCriticalPath, resolveQuickFolderPath } from './policy'
 
 describe('deletion path policy', () => {
   it('blocks system roots but allows content-only cleanup of user folders', () => {
@@ -50,5 +50,15 @@ describe('deletion path policy', () => {
     expect(isCleanable(entry('Logs', `${macHome}/Library/Logs`), 'macos', macHome)).toBe(true)
     expect(isCleanable(entry('Temp', `${winHome}\\Desktop\\Temp`), 'windows', winHome)).toBe(false)
     expect(isCleanable(entry('Temp', `${winHome}\\AppData\\Local\\Temp`), 'windows', winHome)).toBe(true)
+  })
+
+  it('only treats cache, log, and temp roots as automatic cleanup content', () => {
+    const macHome = '/Users/pat'
+    const winHome = 'C:\\Users\\Pat'
+    expect(isAutomaticCleanupRoot(`${macHome}/Library/Caches`, 'macos', macHome)).toBe(true)
+    expect(isAutomaticCleanupRoot(`${macHome}/Library/Logs`, 'macos', macHome)).toBe(true)
+    expect(isAutomaticCleanupRoot(`${macHome}/Desktop`, 'macos', macHome)).toBe(false)
+    expect(isAutomaticCleanupRoot(`${winHome}\\AppData\\Local\\Temp`, 'windows', winHome)).toBe(true)
+    expect(isAutomaticCleanupRoot(`${winHome}\\Downloads`, 'windows', winHome)).toBe(false)
   })
 })

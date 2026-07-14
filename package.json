@@ -1,11 +1,12 @@
 {
   "name": "nerion",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Cross-platform disk space analyzer",
   "author": "patovw",
   "email": "hey@patovw.com",
   "main": "out/main/index.js",
   "scripts": {
+    "postinstall": "install-electron",
     "dev": "electron-vite dev",
     "build": "electron-vite build && npm run verify:secrets",
     "preview": "electron-vite preview",
@@ -129,5 +130,11 @@
       "repo": "nerion-app",
       "releaseType": "release"
     }
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
   }
 }

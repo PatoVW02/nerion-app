@@ -1,6 +1,33 @@
 {
   "releases": [
     {
+      "version": "1.5.1",
+      "date": "July 2026",
+      "description": "Nerion 1.5.1 makes large scans gentler on your computer, adds a secure OpenAI option alongside Ollama, and gives background cleanup and app-leftover review more precise results.",
+      "items": [
+        {
+          "icon": "Cloud",
+          "title": "OpenAI or Local Ollama",
+          "description": "Paid users can choose fully local Ollama or connect an OpenAI API key protected by the operating system. Cloud analysis sends item details only—never the file itself."
+        },
+        {
+          "icon": "Zap",
+          "title": "Smoother Large Scans",
+          "description": "Scans now yield disk and CPU time to the rest of your computer, process locations in a controlled order, and update the interface in efficient batches."
+        },
+        {
+          "icon": "Clock",
+          "title": "Smarter Background Scanning",
+          "description": "Scheduled scans run at a quieter system priority, avoid competing with an active scan, and correctly collect configured cache, log, and temporary-file results."
+        },
+        {
+          "icon": "PackageSearch",
+          "title": "Confident Leftover Cleanup",
+          "description": "Only high-confidence remnants from apps that are no longer installed can be selected. Ambiguous and system-level items stay visible for review without being offered for deletion."
+        }
+      ]
+    },
+    {
       "version": "1.5.0",
       "date": "July 2026",
       "description": "Meet a cleaner, more capable Nerion with local background-item review, smarter app-leftover recommendations, and a new glass interface across macOS and Windows.",

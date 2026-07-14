@@ -24,10 +24,23 @@ export function getCloudAiConfig(env: NodeJS.ProcessEnv = process.env): CloudAiC
   }
 }
 
-export function getAiCapabilities(env: NodeJS.ProcessEnv = process.env): AiCapabilities {
-  return { cloudAvailable: getCloudAiConfig(env) !== null }
+export function getAiCapabilities(
+  env: NodeJS.ProcessEnv = process.env,
+  userCredentialAvailable = false,
+  cloudConfigurable = false,
+): AiCapabilities {
+  const runtimeAvailable = getCloudAiConfig(env) !== null
+  return {
+    cloudAvailable: runtimeAvailable || userCredentialAvailable,
+    cloudSource: runtimeAvailable ? 'runtime' : userCredentialAvailable ? 'user' : null,
+    cloudConfigurable,
+  }
 }
 
-export function normalizeAiMode(mode: unknown, env: NodeJS.ProcessEnv = process.env): AiMode {
-  return mode === 'cloud' && getAiCapabilities(env).cloudAvailable ? 'cloud' : 'ollama'
+export function normalizeAiMode(
+  mode: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+  userCredentialAvailable = false,
+): AiMode {
+  return mode === 'cloud' && getAiCapabilities(env, userCredentialAvailable).cloudAvailable ? 'cloud' : 'ollama'
 }
