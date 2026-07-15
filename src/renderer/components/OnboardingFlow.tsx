@@ -294,7 +294,7 @@ export function OnboardingFlow({ onComplete }: Props) {
                 </svg>
               }
               title="AI-powered analysis"
-              description="Nerion can use a local AI model to explain what files are and whether they're safe to delete. Everything runs on your Mac — nothing leaves your device."
+              description="Nerion can explain what files are and whether they're safe to delete using the included cloud model or fully local Ollama."
             >
               <div className="flex flex-col gap-2">
                 <button
@@ -325,7 +325,7 @@ export function OnboardingFlow({ onComplete }: Props) {
               }
               title="Choose AI provider"
               description={aiCapabilities.cloudAvailable
-                ? 'Choose the configured cloud service or run Ollama locally to keep analysis on your device.'
+                ? 'Use Nerion Cloud AI with no setup, or run Ollama locally to keep analysis on your device.'
                 : 'Use Ollama for private file analysis that stays on your device.'}
             >
               <div className="flex flex-col gap-2">
@@ -334,7 +334,7 @@ export function OnboardingFlow({ onComplete }: Props) {
                     onClick={handleCloudModel}
                     className="w-full py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-sm font-medium text-white transition-colors"
                   >
-                    Cloud model
+                    Nerion Cloud AI
                   </button>
                 )}
                 <button

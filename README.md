@@ -56,9 +56,7 @@ Current variables referenced by the app:
 - `APPLE_APP_SPECIFIC_PASSWORD`
 - `APPLE_TEAM_ID`
 - `CSC_NAME`
-- `NERION_OPENAI_API_KEY` (optional, runtime-only internal builds)
-- `NERION_OPENAI_PROMPT_ID` (optional, runtime-only internal builds)
-- `NERION_OPENAI_PROMPT_VERSION` (optional, runtime-only internal builds)
+- `NERION_CLOUD_AI_ENDPOINT` (optional local/staging override; production defaults to `https://nerionapp.com/api/ai/analyze`)
 
 Notes:
 
@@ -69,11 +67,11 @@ Notes:
   the installer, app executable, and native scanner before upload. With neither
   secret configured, CI publishes an unsigned installer and skips signature
   verification. A partial one-secret configuration fails closed.
-- Public builds offer local Ollama and an optional bring-your-own-key OpenAI
-  mode. User keys are verified before replacement, encrypted with Electron's
-  OS-backed `safeStorage`, and never returned to the renderer. `NERION_OPENAI_*`
-  remains available for managed/internal deployments. Never use `VITE_OPENAI_*`
-  for credentials because Vite embeds those values in the packaged app.
+- Public builds offer Nerion-managed Cloud AI and local Ollama. The desktop
+  app never contains an OpenAI API key or saved-prompt ID. Cloud requests go
+  through Nerion's HTTPS relay, which verifies the active paid license before
+  calling the server-side saved prompt. Never add OpenAI credentials to Vite
+  variables or Electron resources because packaged desktop code is extractable.
 - Checkout and variant values are used for paid plans and license flows.
 
 ## Development

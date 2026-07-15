@@ -4,7 +4,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkS
 import { getDefaultQuickScanFolders } from '../shared/policy'
 import { getAppPlatform, getPlatformMeta } from './platform'
 import { normalizeAiMode } from './ai-config'
-import { loadCloudAiKey } from './cloud-ai'
 import { normalizeSettingsFolderList, normalizeStoredBackgroundResults } from './runtime-policy'
 
 export interface BackgroundScanSettings {
@@ -32,7 +31,7 @@ export interface NerionSettings {
   showDevDependencies: boolean
   /** Store anonymous scan timing counters locally. Never transmitted. */
   localPerformanceDiagnostics: boolean
-  /** 'cloud' = runtime-configured OpenAI; 'ollama' = local Ollama */
+  /** 'cloud' = Nerion-managed cloud service; 'ollama' = local Ollama */
   aiMode: 'cloud' | 'ollama'
   /** Platform-specific quick scan folder identifiers or absolute paths. */
   quickScanFolders: string[]
@@ -209,7 +208,7 @@ export function loadSettings(): NerionSettings {
       mutated = true
     }
 
-    const normalizedAiMode = normalizeAiMode(merged.aiMode, process.env, loadCloudAiKey() !== null)
+    const normalizedAiMode = normalizeAiMode(merged.aiMode)
     if (merged.aiMode !== normalizedAiMode) {
       merged.aiMode = normalizedAiMode
       mutated = true

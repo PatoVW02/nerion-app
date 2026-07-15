@@ -9,6 +9,7 @@ import { runAutoUpdateCheck, scheduleAutoUpdateChecks, stopAutoUpdateChecks } fr
 import { applyWindowMaterial, getAppPlatform, getWindowOptions, hideDock, shouldKeepAppAliveOnWindowClose, showDock } from './platform'
 import { isAllowedExternalUrl, isTrustedRendererNavigation } from './security'
 import { configureScanIndex, disposeScanIndexes } from './scan-index'
+import { removeLegacyCloudAiCredential } from './cloud-ai'
 
 let mainWindow: BrowserWindow | null = null
 let lastRendererRecoveryAt = 0
@@ -150,6 +151,7 @@ void app.whenReady().then(() => {
   // Nerion's dark appearance regardless of the operating-system theme.
   nativeTheme.themeSource = 'dark'
   electronApp.setAppUserModelId('com.patricio.nerion')
+  removeLegacyCloudAiCredential()
 
   // Nerion does not render remote content or need web camera/location/etc.
   // Native notifications and filesystem access use Electron APIs instead.

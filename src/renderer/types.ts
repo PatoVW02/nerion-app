@@ -67,7 +67,7 @@ export interface NerionSettings {
   onboardingComplete: boolean
   showDevDependencies: boolean
   localPerformanceDiagnostics: boolean
-  /** 'cloud' = runtime-configured OpenAI; 'ollama' = local Ollama */
+  /** 'cloud' = Nerion-managed cloud service; 'ollama' = local Ollama */
   aiMode: 'cloud' | 'ollama'
   /** Folder names (relative to ~/Library) included in Quick Scan mode. */
   quickScanFolders: string[]
@@ -193,8 +193,6 @@ declare global {
 
       // AI mode
       getAiCapabilities: () => Promise<AiCapabilities>
-      configureCloudAi: (apiKey: string) => Promise<AiCapabilities>
-      removeCloudAiCredential: () => Promise<AiCapabilities>
       getAiMode: () => Promise<'cloud' | 'ollama'>
       setAiMode: (mode: 'cloud' | 'ollama') => Promise<'cloud' | 'ollama'>
     }

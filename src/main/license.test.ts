@@ -16,7 +16,7 @@ vi.mock('electron', () => ({
   },
 }))
 
-import { activateLicense, licenseTesting, revalidateLicense } from './license'
+import { activateLicense, getCloudLicenseAuthorization, licenseTesting, revalidateLicense } from './license'
 import { net } from 'electron'
 
 const baseLicense = {
@@ -94,6 +94,26 @@ describe('license lifecycle policy', () => {
     })
     expect(JSON.stringify(envelope)).not.toContain(license.key)
     expect(licenseTesting.unprotectLicense(envelope)).toEqual(license)
+  })
+
+  it('keeps the relay credential in the main process and returns it only for active paid access', async () => {
+    vi.mocked(net.fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        activated: true,
+        license_key: { status: 'active', expires_at: null },
+        instance: { id: 'cloud-instance' },
+        meta: { variant_name: 'Lifetime' },
+      }),
+    } as Response)
+
+    expect(getCloudLicenseAuthorization()).toBeNull()
+    await expect(activateLicense('cloud-license-key')).resolves.toMatchObject({ ok: true })
+    expect(getCloudLicenseAuthorization()).toEqual({
+      licenseKey: 'cloud-license-key',
+      instanceId: 'cloud-instance',
+    })
   })
 
   it('rejects a forged or malformed secure entitlement envelope', () => {

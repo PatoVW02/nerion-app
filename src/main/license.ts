@@ -360,6 +360,13 @@ export function getLicenseInfo(): LicenseSnapshot {
   return snapshot()
 }
 
+/** Main-process-only credential used to authorize the Nerion Cloud AI relay. */
+export function getCloudLicenseAuthorization(): { licenseKey: string; instanceId: string } | null {
+  const file = loadFile()
+  if (!file || !snapshot(file).active) return null
+  return { licenseKey: file.key, instanceId: file.instanceId }
+}
+
 async function releaseActivationSlot(key: string, instanceId: string): Promise<void> {
   try {
     await postForm('deactivate', { license_key: key, instance_id: instanceId })

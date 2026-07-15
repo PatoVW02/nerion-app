@@ -6,6 +6,8 @@ import { join, relative, resolve } from 'node:path'
 const outputRoot = resolve(process.cwd(), process.argv[2] ?? 'out')
 const forbiddenPatterns = [
   { name: 'Vite OpenAI credential reference', pattern: /VITE_OPENAI_(?:API_KEY|PROMPT_ID|PROMPT_VERSION)/ },
+  { name: 'runtime OpenAI credential reference', pattern: /NERION_OPENAI_(?:API_KEY|PROMPT_ID|PROMPT_VERSION)/ },
+  { name: 'OpenAI saved prompt identifier', pattern: /\bpmpt_[A-Za-z0-9_-]{8,}\b/ },
   { name: 'OpenAI project/service credential', pattern: /\bsk-(?:proj|svcacc|svcacct)-[A-Za-z0-9_-]{20,}\b/ },
   { name: 'legacy OpenAI credential', pattern: /\bsk-[A-Za-z0-9]{32,}\b/ },
   { name: 'GitHub credential', pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },

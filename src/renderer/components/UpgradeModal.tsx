@@ -8,7 +8,7 @@ const FEATURES = [
   { icon: '✦', label: 'Smart Clean', desc: 'Guided review of caches, logs, app leftovers, and security signals' },
   { icon: '🗑', label: 'Unlimited deletes from app', desc: 'No monthly cap when cleaning directly inside Nerion' },
   { icon: '⚡', label: 'Background scans', desc: 'Scheduled recurring scans with tray notifications' },
-  { icon: '🤖', label: 'Private AI analysis', desc: 'Per-item explanations and delete recommendations via local Ollama' },
+  { icon: '🤖', label: 'Cloud or local AI', desc: 'Zero-setup Nerion Cloud AI or fully local analysis with Ollama' },
   { icon: '⚙', label: 'Custom Quick Scan folders', desc: 'Add any folder to your Quick Scan preset' },
 ]
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, type FormEvent } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { AiCapabilities, NerionSettings, OllamaModel, LicenseInfo, PlatformInfo, UpdaterStatusEvent } from '../types'
 import { formatSize } from '../utils/format'
@@ -183,9 +183,6 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
   const [aiEnabled, setAiEnabled] = useState(() => localStorage.getItem('nerion:aiHidden') !== 'true')
   const [aiMode, setAiMode] = useState<'cloud' | 'ollama'>('ollama')
   const [aiCapabilities, setAiCapabilities] = useState<AiCapabilities>({ cloudAvailable: false, cloudSource: null, cloudConfigurable: false })
-  const [cloudApiKey, setCloudApiKey] = useState('')
-  const [cloudCredentialBusy, setCloudCredentialBusy] = useState(false)
-  const [cloudCredentialError, setCloudCredentialError] = useState<string | null>(null)
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus>('idle')
   const [installedModels, setInstalledModels] = useState<OllamaModel[]>([])
   const [pullingModel, setPullingModel] = useState<string | null>(null)
@@ -198,8 +195,12 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     const appRoot = document.getElementById('root')
     const hadInert = appRoot?.hasAttribute('inert') ?? false
     const previousAriaHidden = appRoot?.getAttribute('aria-hidden') ?? null
+    const previousVisibility = appRoot?.style.visibility ?? ''
     appRoot?.setAttribute('inert', '')
     appRoot?.setAttribute('aria-hidden', 'true')
+    // The settings portal sits outside #root. Hiding the workspace prevents
+    // scan content from showing through the translucent window material.
+    if (appRoot) appRoot.style.visibility = 'hidden'
     closeButtonRef.current?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -210,6 +211,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
       if (!hadInert) appRoot?.removeAttribute('inert')
       if (previousAriaHidden === null) appRoot?.removeAttribute('aria-hidden')
       else appRoot?.setAttribute('aria-hidden', previousAriaHidden)
+      if (appRoot) appRoot.style.visibility = previousVisibility
     }
   }, [onClose])
 
@@ -579,43 +581,6 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     else setOllamaStatus('idle')
   }
 
-  async function connectCloudAi(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const apiKey = cloudApiKey.trim()
-    if (!apiKey) {
-      setCloudCredentialError('Enter an OpenAI API key.')
-      return
-    }
-    setCloudApiKey('')
-    setCloudCredentialBusy(true)
-    setCloudCredentialError(null)
-    try {
-      const capabilities = await window.electronAPI.configureCloudAi(apiKey)
-      setAiCapabilities(capabilities)
-      setAiMode('cloud')
-      setOllamaStatus('idle')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'The OpenAI key could not be verified.'
-      setCloudCredentialError(message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, ''))
-    } finally {
-      setCloudCredentialBusy(false)
-    }
-  }
-
-  async function disconnectCloudAi() {
-    setCloudCredentialBusy(true)
-    setCloudCredentialError(null)
-    try {
-      const capabilities = await window.electronAPI.removeCloudAiCredential()
-      setAiCapabilities(capabilities)
-      if (!capabilities.cloudAvailable) setAiMode('ollama')
-    } catch {
-      setCloudCredentialError('The stored OpenAI key could not be removed.')
-    } finally {
-      setCloudCredentialBusy(false)
-    }
-  }
-
   async function setActiveModel(modelName: string) {
     if (!settings) return
     const next = { ...settings, preferredOllamaModel: modelName }
@@ -895,7 +860,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                     <div className="flex items-center gap-1.5">
                       <div className={['w-1.5 h-1.5 rounded-full shrink-0', aiMode === 'cloud' ? 'bg-blue-400' : 'bg-zinc-600'].join(' ')} />
                       <span className={['text-xs font-semibold', aiMode === 'cloud' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
-                        OpenAI (cloud)
+                        Nerion Cloud AI
                       </span>
                       {!aiCapabilities.cloudAvailable && (
                         <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-semibold bg-white/[0.06] text-zinc-500 uppercase tracking-wide">
@@ -905,8 +870,8 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                     </div>
                     <p id={!aiCapabilities.cloudAvailable ? 'cloud-ai-status' : undefined} className="text-[11px] text-zinc-600 leading-snug">
                       {aiCapabilities.cloudAvailable
-                        ? aiCapabilities.cloudSource === 'user' ? 'Your encrypted OpenAI key' : 'Online analysis through Nerion'
-                        : 'Connect your OpenAI API key below'}
+                        ? 'Included with Premium · no API key needed'
+                        : 'Cloud service unavailable'}
                     </p>
                   </button>
 
@@ -925,11 +890,9 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                       <span className={['text-xs font-semibold', aiMode === 'ollama' ? 'text-zinc-200' : 'text-zinc-400'].join(' ')}>
                         Local AI
                       </span>
-                      {!aiCapabilities.cloudAvailable && (
-                        <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-semibold bg-blue-500/20 text-blue-400 uppercase tracking-wide">
-                          Private
-                        </span>
-                      )}
+                      <span className="ml-1 px-1 py-0.5 rounded text-[9px] font-semibold bg-blue-500/20 text-blue-400 uppercase tracking-wide">
+                        Private
+                      </span>
                     </div>
                     <p className="text-[11px] text-zinc-600 leading-snug">
                       Via Ollama · stays on your device
@@ -937,67 +900,12 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
                   </button>
                 </div>
 
-                {aiCapabilities.cloudSource !== 'runtime' && (
+                {aiMode === 'cloud' && (
                   <div className="mt-1 rounded-lg border border-white/[0.06] bg-black/10 p-3">
-                    {aiCapabilities.cloudSource === 'user' ? (
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-xs font-medium text-zinc-300">OpenAI key connected</p>
-                          <p className="mt-0.5 text-[10px] leading-relaxed text-zinc-600">
-                            Protected by your operating system. API usage is billed to your OpenAI account.
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={disconnectCloudAi}
-                          disabled={cloudCredentialBusy}
-                          className="shrink-0 rounded-md border border-white/[0.08] px-2.5 py-1.5 text-[10px] text-zinc-400 transition-colors hover:bg-white/[0.04] hover:text-zinc-200 disabled:opacity-50"
-                        >
-                          Remove key
-                        </button>
-                      </div>
-                    ) : aiCapabilities.cloudConfigurable ? (
-                      <form onSubmit={connectCloudAi} className="flex flex-col gap-2">
-                        <div className="flex gap-2">
-                          <label htmlFor="openai-api-key" className="sr-only">OpenAI API key</label>
-                          <input
-                            id="openai-api-key"
-                            type="password"
-                            value={cloudApiKey}
-                            onChange={(event) => setCloudApiKey(event.target.value)}
-                            placeholder="sk-proj-…"
-                            autoComplete="off"
-                            spellCheck={false}
-                            disabled={cloudCredentialBusy}
-                            className="min-w-0 flex-1 rounded-md border border-white/[0.08] bg-black/20 px-2.5 py-1.5 font-mono text-[11px] text-zinc-300 outline-none placeholder:text-zinc-700 focus:border-blue-500/40 disabled:opacity-50"
-                          />
-                          <button
-                            type="submit"
-                            disabled={cloudCredentialBusy || cloudApiKey.trim().length === 0}
-                            className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-[10px] font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            {cloudCredentialBusy ? 'Verifying…' : 'Connect'}
-                          </button>
-                        </div>
-                        <p className="text-[10px] leading-relaxed text-zinc-600">
-                          Only the selected item's name, path, type, and size are sent to OpenAI; file contents are never uploaded.{' '}
-                          <button
-                            type="button"
-                            onClick={() => window.electronAPI.openExternal('https://platform.openai.com/api-keys')}
-                            className="text-blue-400/80 hover:text-blue-300"
-                          >
-                            Create a key
-                          </button>
-                        </p>
-                      </form>
-                    ) : (
-                      <p className="text-[10px] leading-relaxed text-amber-300/70">
-                        Secure credential storage is unavailable on this device, so OpenAI cannot be configured safely.
-                      </p>
-                    )}
-                    {cloudCredentialError && (
-                      <p role="alert" className="mt-2 text-[10px] leading-relaxed text-red-300/80">{cloudCredentialError}</p>
-                    )}
+                    <p className="text-xs font-medium text-zinc-300">Ready with Nerion Premium</p>
+                    <p className="mt-1 text-[10px] leading-relaxed text-zinc-600">
+                      Nerion uses its managed cloud model—there is no key to create or configure. The selected item's name, path, type, size, and derived path context are sent for analysis; file contents are never uploaded.
+                    </p>
                   </div>
                 )}
               </div>
