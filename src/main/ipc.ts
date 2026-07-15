@@ -8,7 +8,7 @@ import * as path from 'node:path'
 import { scanDirectoryIndexedStreaming } from './indexed-scanner'
 import { loadSettings, saveSettings, patchSettings, NerionSettings } from './settings'
 import { rebuildTrayMenu, scheduleBackgroundScan, stopBackgroundScan, runBackgroundScanNow, updateLastScanPath, setTrayVisibility, setQuitting, testNotification } from './background'
-import { getLicenseInfo, activateLicense, startLicenseValidationService, deactivateLicense } from './license'
+import { getCloudLicenseAuthorization, getLicenseInfo, activateLicense, startLicenseValidationService, deactivateLicense } from './license'
 import { runAutoUpdateCheck, installDownloadedUpdateNow, isUpdateReadyToInstall } from './updater'
 import { getPlatformAppearance, getPlatformMeta, revealInFileManager, supportsFullDiskAccess } from './platform'
 import { SCAN_PROTOCOL_VERSION, type DeleteBatchResult, type LeftoverScanResult, type ScanEntryV1, type ScanEventV1, type ScanIssueV1, type ScanSummaryV1, type ScanSuspiciousV1, type SuspiciousFinding } from '../shared/contracts'
@@ -17,7 +17,7 @@ import { deleteRequestedPaths } from './deletion'
 import { findAppLeftovers } from './leftovers'
 import { inspectMasqueradingEntry, inspectSuspiciousPersistence } from './suspicious'
 import { getAiCapabilities, getCloudAiConfig, normalizeAiMode } from './ai-config'
-import { canConfigureCloudAi, loadCloudAiKey, OPENAI_MODEL, removeCloudAiKey, validateAndSaveCloudAiKey } from './cloud-ai'
+import { buildCloudAiRelayRequest, cloudAiFailureMessage } from './cloud-ai'
 import { isAllowedExternalUrl } from './security'
 import { isValidIpcPath, normalizeNonNegativeKilobytes, normalizeRendererSettings, parseOllamaPullRecord } from './runtime-policy'
 import { beginForegroundScan, endForegroundScan } from './scan-coordination'
@@ -1194,13 +1194,7 @@ export function registerIpcHandlers(): void {
 
   // ── AI Analysis (Cloud or Ollama) ─────────────────────────────────────────
 
-  // Runtime credentials support managed/internal deployments. Public builds
-  // can instead use a user-provided key protected by the operating system.
-  const currentAiCapabilities = () => getAiCapabilities(
-    process.env,
-    loadCloudAiKey() !== null,
-    canConfigureCloudAi(),
-  )
+  const currentAiCapabilities = () => getAiCapabilities()
 
   /** Stream an OpenAI Responses API SSE response and emit ollama-token / ollama-done events. */
   async function streamResponsesAPI(
@@ -1340,52 +1334,31 @@ What is this item and is it safe to delete?`
       }
 
       try {
-        const aiMode = normalizeAiMode(loadSettings().aiMode, process.env, loadCloudAiKey() !== null)
+        const aiMode = normalizeAiMode(loadSettings().aiMode)
 
         if (aiMode === 'cloud') {
-          const runtimeCloudConfig = getCloudAiConfig()
-          const userApiKey = runtimeCloudConfig ? null : loadCloudAiKey()
-          if (!runtimeCloudConfig && !userApiKey) {
-            throw new Error('Cloud AI is not available. Choose Local AI in Settings.')
-          }
+          const authorization = getCloudLicenseAuthorization()
+          if (!authorization) throw new Error('An active Nerion Premium license is required for Cloud AI.')
+          const cloudConfig = getCloudAiConfig()
+          send('ollama-model', 'Nerion Cloud AI')
 
-          send('ollama-model', runtimeCloudConfig ? 'Nerion Cloud AI' : `OpenAI · ${OPENAI_MODEL}`)
-
-          const requestBody = runtimeCloudConfig
-            ? {
-                stream: true,
-                prompt: {
-                  id: runtimeCloudConfig.promptId,
-                  version: runtimeCloudConfig.promptVersion,
-                  variables: {
-                    name: payload.name,
-                    path: payload.path,
-                    is_directory: payload.isDir ? 'true' : 'false',
-                    size: formatSizeForPrompt(payload.sizeKB),
-                    path_context: getPathContext(payload.path),
-                  },
-                },
-              }
-            : {
-                model: OPENAI_MODEL,
-                instructions: AI_SYSTEM_PROMPT,
-                input: buildAnalysisPrompt(payload),
-                stream: true,
-              }
-
-          const res = await net.fetch('https://api.openai.com/v1/responses', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${runtimeCloudConfig?.apiKey ?? userApiKey!}`,
+          const res = await net.fetch(cloudConfig.endpoint, buildCloudAiRelayRequest(
+            authorization,
+            {
+              name: payload.name,
+              path: payload.path,
+              isDirectory: payload.isDir,
+              size: formatSizeForPrompt(payload.sizeKB),
+              sizeKB: payload.sizeKB,
+              pathContext: getPathContext(payload.path),
+              platform: process.platform === 'win32' ? 'windows' : 'macos',
             },
-            body: JSON.stringify(requestBody),
-            signal: controller.signal
-          })
+            app.getVersion(),
+            controller.signal,
+          ))
 
           if (!res.ok || !res.body) {
-            const errText = (await res.text().catch(() => '')).slice(0, 500)
-            throw new Error(`OpenAI returned ${res.status}${errText ? ': ' + errText : ''}`)
+            throw new Error(await cloudAiFailureMessage(res))
           }
           await streamResponsesAPI(res.body, send)
         } else {
@@ -1425,27 +1398,11 @@ What is this item and is it safe to delete?`
   })
 
   ipcMain.handle('get-ai-capabilities', () => currentAiCapabilities())
-  ipcMain.handle('get-ai-mode', () => normalizeAiMode(
-    loadSettings().aiMode,
-    process.env,
-    loadCloudAiKey() !== null,
-  ))
+  ipcMain.handle('get-ai-mode', () => normalizeAiMode(loadSettings().aiMode))
   ipcMain.handle('set-ai-mode', (_event, mode: unknown) => {
-    const normalizedMode = normalizeAiMode(mode, process.env, loadCloudAiKey() !== null)
+    const normalizedMode = normalizeAiMode(mode)
     patchSettings({ aiMode: normalizedMode })
     return normalizedMode
-  })
-  ipcMain.handle('cloud-ai:configure', async (_event, apiKey: unknown) => {
-    if (!getLicenseInfo().active) throw new Error('A paid license is required for Cloud AI.')
-    await validateAndSaveCloudAiKey(apiKey)
-    patchSettings({ aiMode: 'cloud' })
-    return currentAiCapabilities()
-  })
-  ipcMain.handle('cloud-ai:remove', () => {
-    removeCloudAiKey()
-    const capabilities = currentAiCapabilities()
-    if (!capabilities.cloudAvailable) patchSettings({ aiMode: 'ollama' })
-    return capabilities
   })
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -1467,7 +1424,7 @@ What is this item and is it safe to delete?`
     })
     const mergedSettings: NerionSettings = {
       ...validatedSettings,
-      aiMode: normalizeAiMode(validatedSettings.aiMode, process.env, loadCloudAiKey() !== null),
+      aiMode: normalizeAiMode(validatedSettings.aiMode),
     }
     saveSettings(mergedSettings)
     if (mergedSettings.backgroundScan.enabled !== prev.backgroundScan.enabled ||

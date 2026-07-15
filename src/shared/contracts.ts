@@ -203,6 +203,6 @@ export interface PlatformAppearance {
 
 export interface AiCapabilities {
   cloudAvailable: boolean
-  cloudSource: 'runtime' | 'user' | null
+  cloudSource: 'service' | null
   cloudConfigurable: boolean
 }

@@ -1,6 +1,33 @@
 {
   "releases": [
     {
+      "version": "1.5.3",
+      "date": "July 2026",
+      "description": "Nerion 1.5.3 makes cloud file explanations work out of the box while keeping fully local AI one click away.",
+      "items": [
+        {
+          "icon": "Cloud",
+          "title": "Cloud AI with No Setup",
+          "description": "Premium users can use Nerion Cloud AI immediately—there is no OpenAI account, API key, model download, or usage bill to configure."
+        },
+        {
+          "icon": "Sparkles",
+          "title": "Nerion's Ready-to-Use Model",
+          "description": "File and folder explanations use Nerion's tuned cloud prompt to give short, practical context and a clear keep-or-delete recommendation."
+        },
+        {
+          "icon": "Monitor",
+          "title": "Cloud or Fully Local",
+          "description": "Choose zero-setup Cloud AI or switch to Ollama whenever you want analysis to stay entirely on your computer."
+        },
+        {
+          "icon": "Shield",
+          "title": "Files Stay on Your Device",
+          "description": "Cloud analysis sends only the selected item's metadata and derived path context. Nerion never uploads the file itself or reads its contents for AI analysis."
+        }
+      ]
+    },
+    {
       "version": "1.5.2",
       "date": "July 2026",
       "description": "Nerion 1.5.2 makes repeat scans dramatically lighter, keeps very large folders responsive, and gives Settings a focused full-page workspace.",
@@ -30,12 +57,12 @@
     {
       "version": "1.5.1",
       "date": "July 2026",
-      "description": "Nerion 1.5.1 makes large scans gentler on your computer, adds a secure OpenAI option alongside Ollama, and gives background cleanup and app-leftover review more precise results.",
+      "description": "Nerion 1.5.1 makes large scans gentler on your computer, adds zero-setup Nerion Cloud AI alongside Ollama, and gives background cleanup and app-leftover review more precise results.",
       "items": [
         {
           "icon": "Cloud",
-          "title": "OpenAI or Local Ollama",
-          "description": "Paid users can choose fully local Ollama or connect an OpenAI API key protected by the operating system. Cloud analysis sends item details only—never the file itself."
+          "title": "Nerion Cloud or Local Ollama",
+          "description": "Paid users can choose zero-setup Nerion Cloud AI or fully local Ollama. Cloud analysis sends the selected item's details—never the file itself—and no personal API key is required."
         },
         {
           "icon": "Zap",

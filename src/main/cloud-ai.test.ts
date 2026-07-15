@@ -1,56 +1,65 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync, rmSync } from 'node:fs'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
-const TEST_DIRECTORY = '/tmp/nerion-cloud-ai-tests'
+const TEST_DIRECTORY = join(tmpdir(), 'nerion-cloud-ai-tests')
 
 vi.mock('electron', () => ({
   app: { getPath: () => TEST_DIRECTORY },
-  net: { fetch: vi.fn() },
-  safeStorage: {
-    isEncryptionAvailable: () => true,
-    encryptString: (value: string) => Buffer.from(`protected:${value}`, 'utf8'),
-    decryptString: (value: Buffer) => {
-      const text = value.toString('utf8')
-      if (!text.startsWith('protected:')) throw new Error('invalid protected value')
-      return text.slice('protected:'.length)
-    },
-  },
 }))
 
-import { net } from 'electron'
-import { loadCloudAiKey, removeCloudAiKey, validateAndSaveCloudAiKey } from './cloud-ai'
+import { buildCloudAiRelayRequest, cloudAiFailureMessage, removeLegacyCloudAiCredential } from './cloud-ai'
 
-describe('OpenAI credential storage', () => {
+describe('managed Cloud AI migration', () => {
   beforeEach(() => {
-    rmSync(TEST_DIRECTORY, { recursive: true, force: true })
-    vi.mocked(net.fetch).mockReset()
+    mkdirSync(TEST_DIRECTORY, { recursive: true })
   })
 
-  afterEach(() => rmSync(TEST_DIRECTORY, { recursive: true, force: true }))
-
-  it('validates before saving and never writes the plaintext key', async () => {
-    vi.mocked(net.fetch).mockResolvedValue(new Response('{}', { status: 200 }))
-    const key = 'sk-proj-valid-test-key-1234567890'
-    await validateAndSaveCloudAiKey(key)
-
-    expect(loadCloudAiKey()).toBe(key)
-    expect(readFileSync(`${TEST_DIRECTORY}/cloud-ai.json`, 'utf8')).not.toContain(key)
+  it('removes the obsolete user API-key envelope without needing to decrypt it', () => {
+    const credentialPath = join(TEST_DIRECTORY, 'cloud-ai.json')
+    writeFileSync(credentialPath, '{"schemaVersion":1,"encrypted":"legacy"}')
+    removeLegacyCloudAiCredential()
+    expect(existsSync(credentialPath)).toBe(false)
   })
 
-  it('keeps the last valid credential when a replacement is rejected', async () => {
-    const original = 'sk-proj-original-test-key-123456'
-    vi.mocked(net.fetch).mockResolvedValueOnce(new Response('{}', { status: 200 }))
-    await validateAndSaveCloudAiKey(original)
-    vi.mocked(net.fetch).mockResolvedValueOnce(new Response('{}', { status: 401 }))
-
-    await expect(validateAndSaveCloudAiKey('sk-proj-rejected-test-key-123456')).rejects.toThrow('rejected')
-    expect(loadCloudAiKey()).toBe(original)
+  it('is safe when no legacy credential exists', () => {
+    removeLegacyCloudAiCredential()
+    expect(existsSync(join(TEST_DIRECTORY, 'cloud-ai.json'))).toBe(false)
   })
 
-  it('removes the stored credential without exposing it', async () => {
-    vi.mocked(net.fetch).mockResolvedValue(new Response('{}', { status: 200 }))
-    await validateAndSaveCloudAiKey('sk-proj-removable-test-key-123456')
-    removeCloudAiKey()
-    expect(loadCloudAiKey()).toBeNull()
+  it('authorizes the first-party relay without embedding OpenAI configuration', () => {
+    const signal = new AbortController().signal
+    const request = buildCloudAiRelayRequest(
+      { licenseKey: 'paid-license', instanceId: 'paid-instance' },
+      {
+        name: 'Cache',
+        path: '/Users/test/Library/Caches/example',
+        isDirectory: true,
+        size: '4 MB',
+        sizeKB: 4096,
+        pathContext: 'User cache directory',
+        platform: 'macos',
+      },
+      '1.5.3',
+      signal,
+    )
+
+    expect(request).toMatchObject({ method: 'POST', signal })
+    expect(request.headers).toMatchObject({
+      Authorization: 'Bearer paid-license',
+      'X-Nerion-License-Instance': 'paid-instance',
+      'X-Nerion-App-Version': '1.5.3',
+    })
+    expect(String(request.body)).not.toContain('OPENAI')
+    expect(String(request.body)).not.toContain('fileContents')
+  })
+
+  it('uses bounded relay errors and hides proxy HTML', async () => {
+    await expect(cloudAiFailureMessage(new Response('{"error":"Try later"}', {
+      status: 429,
+      headers: { 'content-type': 'application/json' },
+    }))).resolves.toBe('Try later')
+    await expect(cloudAiFailureMessage(new Response('<html>secret proxy page</html>', { status: 502 }))).resolves.toBe('Nerion Cloud AI returned 502.')
   })
 })

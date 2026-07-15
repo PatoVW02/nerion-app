@@ -161,8 +161,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── AI mode ───────────────────────────────────────────────────────────────
   getAiCapabilities: () => ipcRenderer.invoke('get-ai-capabilities') as Promise<AiCapabilities>,
-  configureCloudAi: (apiKey: string) => ipcRenderer.invoke('cloud-ai:configure', apiKey) as Promise<AiCapabilities>,
-  removeCloudAiCredential: () => ipcRenderer.invoke('cloud-ai:remove') as Promise<AiCapabilities>,
   getAiMode: () => ipcRenderer.invoke('get-ai-mode') as Promise<'cloud' | 'ollama'>,
   setAiMode: (mode: 'cloud' | 'ollama') => ipcRenderer.invoke('set-ai-mode', mode) as Promise<'cloud' | 'ollama'>,
 })
