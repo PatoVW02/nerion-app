@@ -24,6 +24,11 @@
           "icon": "Shield",
           "title": "Files Stay on Your Device",
           "description": "Cloud analysis sends only the selected item's metadata and derived path context. Nerion never uploads the file itself or reads its contents for AI analysis."
+        },
+        {
+          "icon": "Sparkles",
+          "title": "Translucent Settings Workspace",
+          "description": "Settings now shares the main window's refined translucent material while keeping the scan workspace hidden behind it."
         }
       ]
     },

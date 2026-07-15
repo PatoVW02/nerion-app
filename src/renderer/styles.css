@@ -95,7 +95,8 @@ body,
 }
 
 .settings-surface {
-  background: var(--surface-base);
+  background: var(--glass-shell);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
 }
 
 @media (prefers-reduced-transparency: reduce) {

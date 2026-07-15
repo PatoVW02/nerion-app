@@ -195,8 +195,12 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
     const appRoot = document.getElementById('root')
     const hadInert = appRoot?.hasAttribute('inert') ?? false
     const previousAriaHidden = appRoot?.getAttribute('aria-hidden') ?? null
+    const previousVisibility = appRoot?.style.visibility ?? ''
     appRoot?.setAttribute('inert', '')
     appRoot?.setAttribute('aria-hidden', 'true')
+    // The settings portal sits outside #root. Hiding the workspace prevents
+    // scan content from showing through the translucent window material.
+    if (appRoot) appRoot.style.visibility = 'hidden'
     closeButtonRef.current?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -207,6 +211,7 @@ export function SettingsPanel({ onClose, onDevDepsChange, onDeleteModeChange, qu
       if (!hadInert) appRoot?.removeAttribute('inert')
       if (previousAriaHidden === null) appRoot?.removeAttribute('aria-hidden')
       else appRoot?.setAttribute('aria-hidden', previousAriaHidden)
+      if (appRoot) appRoot.style.visibility = previousVisibility
     }
   }, [onClose])
 
